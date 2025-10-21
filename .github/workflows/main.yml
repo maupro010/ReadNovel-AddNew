@@ -1,0 +1,65 @@
+name: Chay Script Scrape khi trigger
+
+# Dieu kien kich hoat workflow
+on:
+
+  workflow_dispatch:
+    # Thêm dòng này để cho phép bạn chạy thủ công (bằng tay)
+    # bất cứ lúc nào từ tab Actions
+
+# Dinh nghia cac "viec" can lam
+jobs:
+  scrape:
+    # Chạy trên một máy ảo Ubuntu (Linux) mới nhất
+    runs-on: ubuntu-latest
+
+    # Cac buoc thuc hien
+    steps:
+    # Buoc 1: Tải code từ repository của bạn về máy ảo
+    - name: 1. Tai code ve (Checkout)
+      uses: actions/checkout@v3
+
+    # Buoc 2: Thiet lap môi trường Python 3.10
+    - name: 2. Thiet lap Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    # Buoc 3: Tao file credentials.json từ Secret
+    - name: 3. Tao file credentials.json
+      env:
+        # Lấy nội dung Secret bạn tạo ở Bước 1
+        GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+      run: |
+        # Ghi nội dung của Secret vào file tên là credentials.json
+        echo "$GOOGLE_CREDENTIALS" > credentials.json
+        echo "Da tao file credentials.json"
+
+    # Buoc 4: Cai dat cac thu vien Python
+    - name: 4. Cai dat thu vien (gspread, playwright)
+      run: |
+        pip install gspread
+        pip install playwright
+
+    # Buoc 5: Cai dat trinh duyet cho Playwright
+    - name: 5. Cai dat trinh duyet Chromium
+      run: playwright install chromium # Chỉ cài chromium cho nhẹ
+
+    # Buoc 6: Chay script Python
+    - name: 6. Chay script Python
+      env:
+        # Lấy thông tin proxy từ secrets và gán vào biến môi trường
+        PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+        PROXY_USER: ${{ secrets.PROXY_USER }}
+        PROXY_PASS: ${{ secrets.PROXY_PASS }}
+        LOGIN_EMAIL: ${{ secrets.LOGIN_EMAIL }}
+        LOGIN_PASSWORD: ${{ secrets.LOGIN_PASSWORD }}
+      run: python vd7.py
+      
+    # BUOC 7: THEM BUOC NAY VAO
+    - name: 7. Luu tru anh chup man hinh (Artifacts)
+      if: always() # Luôn chạy bước này, ngay cả khi bước 6 thất bại
+      uses: actions/upload-artifact@v4
+      with:
+        name: screenshots
+        path: screenshots/
