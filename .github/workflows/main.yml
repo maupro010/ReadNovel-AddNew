@@ -54,7 +54,7 @@ jobs:
         PROXY_PASS: ${{ secrets.PROXY_PASS }}
         LOGIN_EMAIL: ${{ secrets.LOGIN_EMAIL }}
         LOGIN_PASSWORD: ${{ secrets.LOGIN_PASSWORD }}
-      run: python vd7.py
+      run: python addNew.py
       
     # BUOC 7: THEM BUOC NAY VAO
     - name: 7. Luu tru anh chup man hinh (Artifacts)
