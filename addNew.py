@@ -63,6 +63,7 @@ INIT_SCRIPT = """
     }
 })();
 """
+
 # List này sẽ chỉ lưu text từ canvas cho mỗi chương
 captured_canvas_texts = []
 
@@ -80,7 +81,9 @@ async def scrape_novel_detail(page):
     update_selector = '#app > div:nth-child(2) > div > main > div.space-y-5 > div.pb-3 > div.pt-6.px-4.md\\:px-2.grid.grid-cols-1.gap-4.md\\:grid-cols-3 > a:nth-child(3) > div.flex.items-center.text-xs.text-gray-400 > span'
     id_selector = '#app > div:nth-child(2) > div > main > div.space-y-5 > div.block.md\\:flex > div.mb-4.mx-auto.text-center.md\\:mx-0.md\\:text-left > div.space-x-4.mb-6.md\\:mb-8 > div'
     max_seclector2 = '#app > div:nth-child(2) > main > div.space-y-5 > div.block.md\\:flex > div.mb-4.mx-auto.text-center.md\\:mx-0.md\\:text-left > div.space-x-4.mb-6.md\\:mb-8 > button:nth-child(3) > span.absolute.-right-4.-top-4 > span'
-    update2 = '#app > div:nth-child(2) > main > div.space-y-5 > div.pb-3 > div.pt-6.px-4.md\\:px-2.grid.grid-cols-1.gap-4.md\\:grid-cols-3 > a:nth-child(3) > div.flex.items-center.text-xs.text-gray-400 > span'
+    update_selector2 = '#app > div:nth-child(2) > main > div.space-y-5 > div.pb-3 > div.pt-6.px-4.md\\:px-2.grid.grid-cols-1.gap-4.md\\:grid-cols-3 > a:nth-child(3) > div.flex.items-center.text-xs.text-gray-400 > span'
+    id_selector2 = '#app > div:nth-child(2) > main > div.space-y-5 > div.block.md\\:flex > div.mb-4.mx-auto.text-center.md\\:mx-0.md\\:text-left > div.space-x-4.mb-6.md\\:mb-8 > div'
+    
     # Khởi tạo tất cả các biến với giá trị mặc định là chuỗi rỗng
     title = ""
     img = ""
@@ -149,7 +152,7 @@ async def scrape_novel_detail(page):
         
         # --- Lấy ID (data-x-data) ---
         try:
-            data_x_data = await page.locator(id_selector).get_attribute("data-x-data", timeout=60000)
+            data_x_data = await page.locator(id_selector2).get_attribute("data-x-data", timeout=60000)
             if data_x_data:
                 match = re.search(r'\(([^)]+)\)', data_x_data)
                 if match:
@@ -159,8 +162,20 @@ async def scrape_novel_detail(page):
                     print("⚠️ Không tìm thấy ID trong thuộc tính data-x-data.")
             else:
                 print("⚠️ Không tìm thấy thuộc tính data-x-data.")
-        except Exception as e:
-            print(f"⚠️ Lỗi khi lấy ID (data-x-data): {e}")
+        except:
+            try:
+                data_x_data = await page.locator(id_selector).get_attribute("data-x-data", timeout=60000)
+                if data_x_data:
+                    match = re.search(r'\(([^)]+)\)', data_x_data)
+                    if match:
+                        target_id = match.group(1).strip()
+                        print(f"Đã lấy được ID (Dùng Regex): {target_id}")
+                    else:
+                        print("⚠️ Không tìm thấy ID trong thuộc tính data-x-data.")
+                else:
+                    print("⚠️ Không tìm thấy thuộc tính data-x-data.")
+            except Exception as e:
+                print(f"⚠️ Lỗi khi lấy ID (data-x-data): {e}")
         
         # Trả về dictionary, .strip() bây giờ đã an toàn vì tất cả đều là chuỗi
         return {
@@ -215,7 +230,7 @@ async def scrape_chapter_content(page):
 
         print("Canvas đã BẮT ĐẦU vẽ. Chờ 500ms để ổn định...")
         # Thêm một khoảng chờ ngắn để TẤT CẢ các canvas khác vẽ xong (nếu có)
-        await page.wait_for_timeout(300)
+        # await page.wait_for_timeout(300)
         print("Đã ổn định. Bắt đầu thu thập...")
         # =======================================================
 
@@ -378,7 +393,7 @@ async def main():
                 else:
                     worksheet.append_row([i, 'title', 'content'])
                     print(f"Bỏ qua chương {i} do không lấy được nội dung.")
-                    chapter+=1                    
+                    chapter+=1
                 i+=1
                 
 
