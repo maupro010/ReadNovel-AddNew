@@ -63,30 +63,8 @@ INIT_SCRIPT = """
     }
 })();
 """
-
 # List này sẽ chỉ lưu text từ canvas cho mỗi chương
 captured_canvas_texts = []
-
-async def get_max_chapter(page):
-    max_seclector = '#app > div:nth-child(2) > div > main > div.space-y-5 > div.block.md\\:flex > div.mb-4.mx-auto.text-center.md\\:mx-0.md\\:text-left > div.space-x-4.mb-6.md\\:mb-8 > button:nth-child(3) > span.absolute.-right-4.-top-4 > span'
-    update = '#app > div:nth-child(2) > div > main > div.space-y-5 > div.pb-3 > div.pt-6.px-4.md\\:px-2.grid.grid-cols-1.gap-4.md\\:grid-cols-3 > a:nth-child(3) > div.flex.items-center.text-xs.text-gray-400 > span'
-    max_seclector2 = '#app > div:nth-child(2) > main > div.space-y-5 > div.block.md\\:flex > div.mb-4.mx-auto.text-center.md\\:mx-0.md\\:text-left > div.space-x-4.mb-6.md\\:mb-8 > button:nth-child(3) > span.absolute.-right-4.-top-4 > span'
-    update2 = '#app > div:nth-child(2) > main > div.space-y-5 > div.pb-3 > div.pt-6.px-4.md\\:px-2.grid.grid-cols-1.gap-4.md\\:grid-cols-3 > a:nth-child(3) > div.flex.items-center.text-xs.text-gray-400 > span'
-    
-    try:
-        try:
-            max_chapter = await page.locator(max_seclector2).inner_text()
-        except:
-            max_chapter = await page.locator(max_seclector).inner_text()
-        try:
-            update = await page.locator(update2).inner_text()
-        except:
-            update = await page.locator(update).inner_text()
-        return max_chapter, update;
-
-    except Exception as e:
-        print(f"Lỗi khi lấy số chương: {e}")
-        return None
 
 async def scrape_novel_detail(page):
     """
