@@ -101,6 +101,8 @@ async def scrape_novel_detail(page):
     max_seclector = '#app > div:nth-child(2) > div > main > div.space-y-5 > div.block.md\\:flex > div.mb-4.mx-auto.text-center.md\\:mx-0.md\\:text-left > div.space-x-4.mb-6.md\\:mb-8 > button:nth-child(3) > span.absolute.-right-4.-top-4 > span'
     update_selector = '#app > div:nth-child(2) > div > main > div.space-y-5 > div.pb-3 > div.pt-6.px-4.md\\:px-2.grid.grid-cols-1.gap-4.md\\:grid-cols-3 > a:nth-child(3) > div.flex.items-center.text-xs.text-gray-400 > span'
     id_selector = '#app > div:nth-child(2) > div > main > div.space-y-5 > div.block.md\\:flex > div.mb-4.mx-auto.text-center.md\\:mx-0.md\\:text-left > div.space-x-4.mb-6.md\\:mb-8 > div'
+    max_seclector2 = '#app > div:nth-child(2) > main > div.space-y-5 > div.block.md\\:flex > div.mb-4.mx-auto.text-center.md\\:mx-0.md\\:text-left > div.space-x-4.mb-6.md\\:mb-8 > button:nth-child(3) > span.absolute.-right-4.-top-4 > span'
+    update2 = '#app > div:nth-child(2) > main > div.space-y-5 > div.pb-3 > div.pt-6.px-4.md\\:px-2.grid.grid-cols-1.gap-4.md\\:grid-cols-3 > a:nth-child(3) > div.flex.items-center.text-xs.text-gray-400 > span'
     # Khởi tạo tất cả các biến với giá trị mặc định là chuỗi rỗng
     title = ""
     img = ""
@@ -147,17 +149,25 @@ async def scrape_novel_detail(page):
 
         # --- Lấy maxChapter ---
         try:
-            maxChapter = await page.locator(max_seclector).inner_text(timeout=30000)
+            maxChapter = await page.locator(max_seclector2).inner_text(timeout=30000)
             print(f"Đã tìm thấy maxChapter: {maxChapter.strip()}")
-        except Exception as e:
-            print(f"⚠️ Lỗi khi lấy maxChapter: {e}")
+        except:
+            try:
+                maxChapter = await page.locator(max_seclector).inner_text(timeout=30000)
+                print(f"Đã tìm thấy maxChapter: {maxChapter.strip()}")
+            except Exception as e:
+                print(f"⚠️ Lỗi khi lấy maxChapter: {e}")
         
         # --- Lấy update ---
         try:
-            update = await page.locator(update_selector).inner_text(timeout=30000)
+            update = await page.locator(update_selector2).inner_text(timeout=30000)
             print(f"Đã tìm thấy update: {update.strip()}")
-        except Exception as e:
-            print(f"⚠️ Lỗi khi lấy update: {e}")
+        except:
+            try:
+                update = await page.locator(update_selector).inner_text(timeout=30000)
+                print(f"Đã tìm thấy update: {update.strip()}")
+            except Exception as e:
+                print(f"⚠️ Lỗi khi lấy update: {e}")
         
         # --- Lấy ID (data-x-data) ---
         try:
