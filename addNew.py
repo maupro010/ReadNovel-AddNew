@@ -20,6 +20,50 @@ GOOGLE_SHEET_NAME = "https://docs.google.com/spreadsheets/d/1rCGTw4GdGlR4K-H7hDk
 CREDENTIALS_FILE = "credentials.json"
 # ------------------------------
 
+INIT_SCRIPT = """
+(() => {
+    // Một hàm chung để xử lý việc bắt text
+    const textCapture = function(originalMethod, ...args) {
+        const text = args[0];
+        
+        // Chỉ cần text tồn tại và không phải là chuỗi rác
+        if (text && text.trim() && !text.includes('Cwm fjordbank gly')) {
+            // 'this' là context, 'this.canvas' là thẻ <canvas> DOM
+            const canvas = this.canvas; 
+            
+            // Lấy text đã có (nếu canvas vẽ nhiều dòng) và nối thêm
+            let currentText = canvas.getAttribute('data-captured-text') || '';
+            
+            // Thêm một khoảng trắng để các từ không dính vào nhau
+            canvas.setAttribute('data-captured-text', currentText + text.trim() + ' ');
+        }
+        
+        // Luôn gọi hàm gốc
+        originalMethod.apply(this, args);
+    };
+
+    // --- Patch fillText ---
+    try {
+        const originalFillText = CanvasRenderingContext2D.prototype.fillText;
+        CanvasRenderingContext2D.prototype.fillText = function(...args) {
+            textCapture.call(this, originalFillText, ...args);
+        };
+    } catch (e) {
+        console.error('Failed to patch fillText:', e);
+    }
+
+    // --- Patch strokeText (cho chắc) ---
+    try {
+        const originalStrokeText = CanvasRenderingContext2D.prototype.strokeText;
+        CanvasRenderingContext2D.prototype.strokeText = function(...args) {
+            textCapture.call(this, originalStrokeText, ...args);
+        };
+    } catch (e) {
+        console.error('Failed to patch strokeText:', e);
+    }
+})();
+"""
+
 # List này sẽ chỉ lưu text từ canvas cho mỗi chương
 captured_canvas_texts = []
 
@@ -146,61 +190,71 @@ async def scrape_novel_detail(page):
 
 async def scrape_chapter_content(page):
     """
-    Hàm này lấy tiêu đề và nội dung chương bằng cách thực hiện toàn bộ logic
-    bên trong trình duyệt để đảm bảo đúng thứ tự.
+    Hàm này lấy tiêu đề và nội dung chương.
+    1. Dùng wait_for_function để đảm bảo canvas đã được INIT_SCRIPT xử lý.
+    2. Dùng evaluate để đọc DOM và thuộc tính 'data-captured-text' từ canvas.
     """
     content_selector = '#chapter-content'
     title_selector = 'h2.text-center'
     try:
         # Lấy tiêu đề chương
-        await page.wait_for_selector(title_selector, timeout=30000)
         title = await page.locator(title_selector).inner_text()
         print(f"Đã tìm thấy tiêu đề: {title.strip()}")
 
-        await page.wait_for_selector(content_selector, timeout=30000)
-        print("Container nội dung đã xuất hiện. Bắt đầu thu thập...")
+        await page.wait_for_selector(content_selector, timeout=3000)
+        print("Container nội dung đã xuất hiện. Đang chờ canvas vẽ...")
 
-        # === LOGIC MỚI ===
-        # Toàn bộ việc bắt text canvas và ghép nối được thực hiện trong một lần evaluate
+        # === (THAY ĐỔI 2) LOGIC CHỜ MỚI - ĐÁNG TIN CẬY ===
+        # Chờ cho đến khi BẤT KỲ canvas nào có thuộc tính (nghĩa là việc vẽ đã bắt đầu)
+        # Hoặc cho đến khi không tìm thấy canvas nào
+        await page.wait_for_function(f"""
+            () => {{
+                const container = document.querySelector('{content_selector}');
+                if (!container) return false;
+                
+                const canvases = container.querySelectorAll('canvas');
+                
+                // Nếu không có canvas, coi như đã xong (trả về true)
+                if (canvases.length === 0) return true; 
+                
+                // Trả về true nếu BẤT KỲ (some) canvas nào có thuộc tính
+                // (nghĩa là INIT_SCRIPT đã bắt đầu hoạt động)
+                return Array.from(canvases).some(canvas => canvas.hasAttribute('data-captured-text'));
+            }}
+        """, timeout=10000) # Cho tối đa 10 giây để BẮT ĐẦU vẽ
+
+        print("Canvas đã BẮT ĐẦU vẽ. Chờ 500ms để ổn định...")
+        # Thêm một khoảng chờ ngắn để TẤT CẢ các canvas khác vẽ xong (nếu có)
+        await page.wait_for_timeout(300)
+        print("Đã ổn định. Bắt đầu thu thập...")
+        # =======================================================
+
+
+        # === (THAY ĐỔI 3) LOGIC EVALUATE MỚI - ĐỌC ATTRIBUTE ===
+        # Logic này không cần mảng toàn cục nữa, chỉ cần đọc DOM
         full_content = await page.evaluate(f"""
         (async () => {{
             const contentDiv = document.querySelector('{content_selector}');
             if (!contentDiv) return "[LỖI: Không tìm thấy container nội dung]";
-
-            // Bước 1: Tạo một mảng tạm để lưu text từ canvas theo đúng thứ tự
-            const capturedCanvasTexts = [];
-            const originalFillText = CanvasRenderingContext2D.prototype.fillText;
-
-            // Bước 2: Ghi đè (override) hàm fillText để bắt text
-            // Text sẽ được đẩy vào mảng tạm ở trên
-            CanvasRenderingContext2D.prototype.fillText = function(...args) {{
-                const text = args[0];
-                if (text && !text.includes('Cwm fjordbank gly')) {{
-                    capturedCanvasTexts.push(text.trim());
-                }}
-                originalFillText.apply(this, args);
-            }};
-
-            // Bước 3: Đợi một khoảng ngắn để trình duyệt có thời gian vẽ lên canvas
-            // Điều này kích hoạt hàm fillText đã bị ghi đè của chúng ta
-            await new Promise(r => setTimeout(r, 300));
-
-            // Bước 4: Khôi phục lại hàm fillText gốc để tránh ảnh hưởng các trang khác
-            CanvasRenderingContext2D.prototype.fillText = originalFillText;
-
-            // Bước 5: Bây giờ mới đọc cấu trúc DOM và ghép nối kết quả
-            const final_content_parts = [];
-            const canvasIterator = capturedCanvasTexts.values(); // Tạo iterator cho mảng canvas
             
+            // Không cần mảng toàn cục, không cần iterator
+            
+            const final_content_parts = [];
             const nodes = Array.from(contentDiv.childNodes);
+            
             nodes.forEach(node => {{
-                if (node.nodeType === Node.TEXT_NODE) {{
+                if (node.nodeType === 3) {{ // 3 == Node.TEXT_NODE (Text thô)
                     const text = node.textContent.trim();
                     if (text) final_content_parts.push(text);
-                }} else if (node.nodeType === Node.ELEMENT_NODE) {{
+                
+                }} else if (node.nodeType === 1) {{ // 1 == Node.ELEMENT_NODE (Thẻ HTML)
+                    
                     if (node.tagName.toUpperCase() === 'CANVAS') {{
-                        const canvasText = canvasIterator.next().value;
-                        if(canvasText) final_content_parts.push(canvasText);
+                        // ĐỌC TRỰC TIẾP TỪ THUỘC TÍNH
+                        const canvasText = node.getAttribute('data-captured-text');
+                        if (canvasText) {{
+                            final_content_parts.push(canvasText.trim());
+                        }}
 
                     }} else if (node.tagName.toUpperCase() === 'BR') {{
                         final_content_parts.push('\\n');
@@ -211,7 +265,11 @@ async def scrape_chapter_content(page):
                 }}
             }});
             
-            return final_content_parts.join('\\n').replace(/\\n+/g, '\\n\\n');
+            let result = final_content_parts.join('\\n').replace(/\\n+/g, '\\n\\n');
+            // Sửa lỗi f-string/regex: dùng {{...}}
+            result = result.replace(/(\\n\\n ?){{2,}}/g, '\\n\\n');
+            
+            return result;
         }})()
         """)
         
@@ -249,7 +307,7 @@ async def main():
         context = await browser.new_context()
         page = await context.new_page()
         page.set_default_timeout(60000) # 90 giây
-
+        await page.add_init_script(INIT_SCRIPT)
         try:
             # --- PHẦN 1: ĐĂNG NHẬP (Chỉ chạy một lần) ---
             print("Bắt đầu quá trình đăng nhập...")
