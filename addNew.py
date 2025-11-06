@@ -335,7 +335,7 @@ async def main():
             sh = gc.open_by_url(GOOGLE_SHEET_NAME)
             print("Kết nối thành công!")
             sheet_list = sh.worksheet("list")
-            # existing_stt_list = sheet_list.col_values(1)
+            existing_stt_list = sheet_list.col_values(1)
             list_novel = existing_stt_list[1:]
             ID = sheet_list.col_values(1)[-1]
             max_chapter = sheet_list.col_values(6)[-1]
