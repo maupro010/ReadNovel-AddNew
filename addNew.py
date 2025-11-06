@@ -335,23 +335,23 @@ async def main():
             sh = gc.open_by_url(GOOGLE_SHEET_NAME)
             print("Kết nối thành công!")
             sheet_list = sh.worksheet("list")
-            existing_stt_list = sheet_list.col_values(1)
-            list_novel = existing_stt_list[1:]
-            ID = list_novel[-1]
+            # existing_stt_list = sheet_list.col_values(1)
+            # list_novel = existing_stt_list[1:]
+            ID = sheet_list.col_values(1)[-1]
+            max_chapter = sheet_list.col_values(6)[-1]
+            # print("Đang lấy thông tin truyện")
+            # await page.goto("https://metruyencv.com/truyen/"+ID, wait_until="domcontentloaded")
+            # scraped_data = await scrape_novel_detail(page)
+            # if scraped_data:
+            #     sheet_list.update_cell(list_novel.index(ID)+2, 2, scraped_data['title'])
+            #     sheet_list.update_cell(list_novel.index(ID)+2, 3, scraped_data['author'])
+            #     sheet_list.update_cell(list_novel.index(ID)+2, 4, scraped_data['desc'])
+            #     sheet_list.update_cell(list_novel.index(ID)+2, 5, scraped_data['img'])
+            #     sheet_list.update_cell(list_novel.index(ID)+2, 6, scraped_data['maxChapter'])
+            #     sheet_list.update_cell(list_novel.index(ID)+2, 7, scraped_data['update'])
+            #     sheet_list.update_cell(list_novel.index(ID)+2, 8, scraped_data['id'])
 
-            print("Đang lấy thông tin truyện")
-            await page.goto("https://metruyencv.com/truyen/"+ID, wait_until="domcontentloaded")
-            scraped_data = await scrape_novel_detail(page)
-            if scraped_data:
-                sheet_list.update_cell(list_novel.index(ID)+2, 2, scraped_data['title'])
-                sheet_list.update_cell(list_novel.index(ID)+2, 3, scraped_data['author'])
-                sheet_list.update_cell(list_novel.index(ID)+2, 4, scraped_data['desc'])
-                sheet_list.update_cell(list_novel.index(ID)+2, 5, scraped_data['img'])
-                sheet_list.update_cell(list_novel.index(ID)+2, 6, scraped_data['maxChapter'])
-                sheet_list.update_cell(list_novel.index(ID)+2, 7, scraped_data['update'])
-                sheet_list.update_cell(list_novel.index(ID)+2, 8, scraped_data['id'])
-
-            max_chapter = scraped_data['maxChapter']
+            # max_chapter = scraped_data['maxChapter']
 
             sheet_title = ID
             existing_chapters = set()
@@ -371,11 +371,13 @@ async def main():
             BASE_URL = "https://metruyencv.com/truyen/"+ID+"/chuong-{}"
             # --- PHẦN 2: DUYỆT QUA CÁC CHƯƠNG ---
             i = 1
+            j = 1
             chapter = int(max_chapter)
-            while i<=chapter:
+            while j<=chapter:
                 # >>> KIỂM TRA NẾU CHƯƠNG ĐÃ TỒN TẠI THÌ BỎ QUA <<<
                 if i in existing_chapters:
                     i+=1
+                    j+=1
                     continue
 
                 chapter_url = BASE_URL.format(i)
@@ -388,12 +390,13 @@ async def main():
                 scraped_data = await scrape_chapter_content(page)
                 
                 if scraped_data:
-                    worksheet.append_row([i, scraped_data['title'], scraped_data['content']])
+                    worksheet.append_row([j, scraped_data['title'], scraped_data['content']])
                     print(f"Đã lưu thành công chương {i} vào Google Sheet")
+                    j+=1
                 else:
-                    worksheet.append_row([i, 'title', 'content'])
+                    # worksheet.append_row([i, 'title', 'content'])
                     print(f"Bỏ qua chương {i} do không lấy được nội dung.")
-                    chapter+=1
+                    # chapter+=1
                 i+=1
                 
 
@@ -407,6 +410,7 @@ async def main():
 
         finally:
             print("\nQuá trình đã hoàn tất. Đóng trình duyệt.")
+            sheet_list.update_cell(list_novel.index(ID)+2, 9, 'false')
             await browser.close()
 
 # Chạy script
