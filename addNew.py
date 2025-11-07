@@ -390,11 +390,11 @@ async def main():
                 scraped_data = await scrape_chapter_content(page)
                 
                 if scraped_data:
-                    worksheet.append_row([j, scraped_data['title'], scraped_data['content']])
+                    worksheet.append_row([i, scraped_data['title'], scraped_data['content']])
                     print(f"Đã lưu thành công chương {i} vào Google Sheet")
                     j+=1
                 else:
-                    # worksheet.append_row([i, 'title', 'content'])
+                    worksheet.append_row([i, 'title', 'content'])
                     print(f"Bỏ qua chương {i} do không lấy được nội dung.")
                     # chapter+=1
                 i+=1
