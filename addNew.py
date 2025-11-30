@@ -105,7 +105,7 @@ async def scrape_novel_detail(page):
         # --- Lấy img url ---
         try:
             # .get_attribute() cũng đã bao gồm auto-wait
-            img_url = await page.locator(img_selector).get_attribute("src", timeout=30000)
+            img_url = await page.locator(img_selector).get_attribute("src")
             if img_url: # Phải kiểm tra None trước khi gán
                 img = img_url
                 print(f"Đã tìm thấy img: {img.strip()}")
@@ -152,7 +152,7 @@ async def scrape_novel_detail(page):
         
         # --- Lấy ID (data-x-data) ---
         try:
-            data_x_data = await page.locator(id_selector2).get_attribute("data-x-data", timeout=60000)
+            data_x_data = await page.locator(id_selector2).get_attribute("data-x-data")
             if data_x_data:
                 match = re.search(r'\(([^)]+)\)', data_x_data)
                 if match:
@@ -164,7 +164,7 @@ async def scrape_novel_detail(page):
                 print("⚠️ Không tìm thấy thuộc tính data-x-data.")
         except:
             try:
-                data_x_data = await page.locator(id_selector).get_attribute("data-x-data", timeout=60000)
+                data_x_data = await page.locator(id_selector).get_attribute("data-x-data")
                 if data_x_data:
                     match = re.search(r'\(([^)]+)\)', data_x_data)
                     if match:
@@ -206,7 +206,7 @@ async def scrape_chapter_content(page):
         title = await page.locator(title_selector).inner_text()
         print(f"Đã tìm thấy tiêu đề: {title.strip()}")
 
-        await page.wait_for_selector(content_selector, timeout=3000)
+        await page.wait_for_selector(content_selector)
         print("Container nội dung đã xuất hiện. Đang chờ canvas vẽ...")
 
         # === (THAY ĐỔI 2) LOGIC CHỜ MỚI - ĐÁNG TIN CẬY ===
@@ -311,23 +311,21 @@ async def main():
         )
         context = await browser.new_context()
         page = await context.new_page()
-        page.set_default_timeout(60000) # 90 giây
+        page.set_default_timeout(60000) # 60 giây
         await page.add_init_script(INIT_SCRIPT)
         try:
             # --- PHẦN 1: ĐĂNG NHẬP (Chỉ chạy một lần) ---
             print("Bắt đầu quá trình đăng nhập...")
-            await page.goto("https://metruyencv.com", wait_until="domcontentloaded", timeout=60000)
+            await page.goto("https://metruyencv.com", wait_until="domcontentloaded")
             
             menu_icon_locator = page.locator('svg:has(path[d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"])')
-            await menu_icon_locator.wait_for(state="visible", timeout=15000)
+            await menu_icon_locator.wait_for(state="visible")
             await menu_icon_locator.click()
             await page.get_by_role("button", name="Đăng nhập").click()
             await page.get_by_placeholder("email").fill(LOGIN_EMAIL)
             await page.get_by_placeholder("password").fill(LOGIN_PASSWORD)
             await page.get_by_role("button", name="Đăng nhập").click()
             print("Đăng nhập thành công!")
-            await page.wait_for_timeout(5000) # Tăng thời gian chờ
-
             
             # --- PHẦN 0: KẾT NỐI VÀ KIỂM TRA GOOGLE SHEET ---
             print("Đang kết nối tới Google Sheets...")
