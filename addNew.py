@@ -16,7 +16,7 @@ LOGIN_PASSWORD = os.environ.get('LOGIN_PASSWORD')
 # ------------------------------
 
 # --- THÔNG TIN GOOGLE SHEET ---
-GOOGLE_SHEET_NAME = "https://docs.google.com/spreadsheets/d/1rCGTw4GdGlR4K-H7hDk8TjjnGh1jL3NgNZLRQ_h8jY8/edit?usp=sharing"
+GOOGLE_SHEET_NAME = os.environ.get('GOOGLE_SHEET_NAME')
 CREDENTIALS_FILE = "credentials.json"
 # ------------------------------
 
@@ -371,31 +371,50 @@ async def main():
             i = 1
             j = 1
             chapter = int(max_chapter)
-            while j<=chapter:
-                # >>> KIỂM TRA NẾU CHƯƠNG ĐÃ TỒN TẠI THÌ BỎ QUA <<<
+            
+            while j <= chapter:
+                # Bỏ qua nếu chương đã tồn tại
                 if i in existing_chapters:
-                    i+=1
-                    j+=1
+                    i += 1
+                    j += 1
                     continue
 
                 chapter_url = BASE_URL.format(i)
                 print(f"\n--- Đang xử lý chương {i}: {chapter_url} ---")
                 
-                captured_canvas_texts.clear()
-                
-                await page.goto(chapter_url, wait_until="domcontentloaded")
-                
-                scraped_data = await scrape_chapter_content(page)
-                
-                if scraped_data:
-                    worksheet.append_row([i, scraped_data['title'], scraped_data['content']])
-                    print(f"Đã lưu thành công chương {i} vào Google Sheet")
-                    j+=1
-                else:
-                    worksheet.append_row([i, 'title', 'content'])
-                    print(f"Bỏ qua chương {i} do không lấy được nội dung.")
-                    # chapter+=1
-                i+=1
+                # Vòng lặp retry vô tận cho đến khi thành công hoặc gặp 404
+                while True:
+                    try:
+                        captured_canvas_texts.clear() # Xóa buffer cũ
+                        response = await page.goto(chapter_url, wait_until="domcontentloaded")
+
+                        # === LOGIC 1: XỬ LÝ 404 ===
+                        if response and response.status == 404:
+                            worksheet.append_row([i, 'title', 'content'])
+                            print(f"⚠️ Bỏ qua chương {i} do lỗi 404 (Không tồn tại).")
+                            # Thoát retry để tăng i lên chương tiếp theo
+                            break 
+
+                        # === LOGIC 2: LẤY NỘI DUNG ===
+                        scraped_data = await scrape_chapter_content(page)
+
+                        if scraped_data:
+                            worksheet.append_row([i, scraped_data['title'], scraped_data['content']])
+                            print(f"✅ Đã lưu thành công chương {i} vào Google Sheet")
+                            j += 1
+                            break # Lấy thành công -> Thoát retry
+                        else:
+                            # === LOGIC 3: RETRY NẾU LỖI KHÁC ===
+                            print(f"🔄 Không lấy được nội dung chương {i}. Đang tải lại trang và thử lại...")
+                            await asyncio.sleep(2) # Nghỉ 2s tránh spam request
+                            # Vòng lặp while True sẽ tự chạy lại từ đầu (goto)
+
+                    except Exception as e:
+                        print(f"❌ Lỗi kết nối/ngoại lệ: {e}. Đang thử lại...")
+                        await asyncio.sleep(2)
+
+                # Tăng số thứ tự chương để duyệt tiếp
+                i += 1
                 
 
         except Exception as e:
