@@ -16,7 +16,7 @@ LOGIN_PASSWORD = os.environ.get('LOGIN_PASSWORD')
 # ------------------------------
 
 # --- THÔNG TIN GOOGLE SHEET ---
-GOOGLE_SHEET_NAME = os.environ.get('GOOGLE_SHEET_NAME')
+GOOGLE_SHEET_NAME = "https://docs.google.com/spreadsheets/d/1rCGTw4GdGlR4K-H7hDk8TjjnGh1jL3NgNZLRQ_h8jY8/edit?usp=sharing"
 CREDENTIALS_FILE = "credentials.json"
 # ------------------------------
 
