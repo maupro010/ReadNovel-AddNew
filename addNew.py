@@ -399,10 +399,14 @@ async def main():
                         scraped_data = await scrape_chapter_content(page)
 
                         if scraped_data:
-                            worksheet.append_row([i, scraped_data['title'], scraped_data['content']])
-                            print(f"✅ Đã lưu thành công chương {i} vào Google Sheet")
-                            j += 1
-                            break # Lấy thành công -> Thoát retry
+                            if len(scraped_data['content'].split()) > 1000:
+                                worksheet.append_row([i, scraped_data['title'], scraped_data['content']])
+                                print(f"✅ Đã lưu thành công chương {i} vào Google Sheet")
+                                j += 1
+                                break # Lấy thành công -> Thoát retry
+                            else:
+                                print(f"⚠️ Bỏ qua chương {i} do chương vip.")
+                                break 
                         else:
                             # === LOGIC 3: RETRY NẾU LỖI KHÁC ===
                             print(f"🔄 Không lấy được nội dung chương {i}. Đang tải lại trang và thử lại...")
