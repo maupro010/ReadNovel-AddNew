@@ -406,6 +406,7 @@ async def main():
                                 break # Lấy thành công -> Thoát retry
                             else:
                                 print(f"⚠️ Bỏ qua chương {i} do chương vip.")
+                                j += 1
                                 break 
                         else:
                             # === LOGIC 3: RETRY NẾU LỖI KHÁC ===
