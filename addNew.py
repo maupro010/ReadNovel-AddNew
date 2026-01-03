@@ -399,7 +399,7 @@ async def main():
                         scraped_data = await scrape_chapter_content(page)
 
                         if scraped_data:
-                            if len(scraped_data['content'].split()) > 1000 and j > chapter - 10:
+                            if len(scraped_data['content'].split()) > 1000 or j < chapter - 10:
                                 worksheet.append_row([i, scraped_data['title'], scraped_data['content']])
                                 print(f"✅ Đã lưu thành công chương {i} vào Google Sheet")
                                 j += 1
