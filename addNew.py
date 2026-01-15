@@ -337,19 +337,6 @@ async def main():
             list_novel = existing_stt_list[1:]
             ID = sheet_list.col_values(1)[-1]
             max_chapter = sheet_list.col_values(6)[-1]
-            # print("Đang lấy thông tin truyện")
-            # await page.goto("https://metruyencv.com/truyen/"+ID, wait_until="domcontentloaded")
-            # scraped_data = await scrape_novel_detail(page)
-            # if scraped_data:
-            #     sheet_list.update_cell(list_novel.index(ID)+2, 2, scraped_data['title'])
-            #     sheet_list.update_cell(list_novel.index(ID)+2, 3, scraped_data['author'])
-            #     sheet_list.update_cell(list_novel.index(ID)+2, 4, scraped_data['desc'])
-            #     sheet_list.update_cell(list_novel.index(ID)+2, 5, scraped_data['img'])
-            #     sheet_list.update_cell(list_novel.index(ID)+2, 6, scraped_data['maxChapter'])
-            #     sheet_list.update_cell(list_novel.index(ID)+2, 7, scraped_data['update'])
-            #     sheet_list.update_cell(list_novel.index(ID)+2, 8, scraped_data['id'])
-
-            # max_chapter = scraped_data['maxChapter']
 
             sheet_title = ID
             existing_chapters = set()
@@ -399,11 +386,23 @@ async def main():
                         scraped_data = await scrape_chapter_content(page)
 
                         if scraped_data:
-                            if len(scraped_data['content'].split()) > 1000 or j < chapter - 10:
-                                worksheet.append_row([i, scraped_data['title'], scraped_data['content']])
-                                print(f"✅ Đã lưu thành công chương {i} vào Google Sheet")
+                            words = scraped_data['content'].split()
+                            word_count = len(words)
+                            rows_to_append = []
+                            
+                            if word_count > 10000:
+                                # Chia nhỏ thành các danh sách con để dùng append_rows
+                                for k in range(0, word_count, 10000):
+                                    chunk = " ".join(words[k : k + 10000])
+                                    rows_to_append.append([i, scraped_data['title'], chunk])
+                            elif word_count > 1000 or j < chapter - 10:
+                                rows_to_append.append([i, scraped_data['title'], scraped_data['content']])
+                            
+                            if rows_to_append:
+                                worksheet.append_rows(rows_to_append)
+                                print(f"✅ Đã lưu thành công chương {i} vào Google Sheet ({len(rows_to_append)} dòng)")
                                 j += 1
-                                break # Lấy thành công -> Thoát retry
+                                break
                             else:
                                 print(f"⚠️ Bỏ qua chương {i} do chương vip.")
                                 j += 1
