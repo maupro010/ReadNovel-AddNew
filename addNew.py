@@ -386,21 +386,23 @@ async def main():
                         scraped_data = await scrape_chapter_content(page)
 
                         if scraped_data:
-                            words = scraped_data['content'].split()
-                            word_count = len(words)
+                            content = scraped_data['content']
+                            word_count = len(content.split())
                             rows_to_append = []
+                            # 35.000 ký tự thường tương đương 5.000 - 6.000 từ (an toàn cho giới hạn 50.000 của Sheets)
+                            CHAR_LIMIT = 35000 
                             
-                            if word_count > 10000:
-                                # Chia nhỏ thành các danh sách con để dùng append_rows
-                                for k in range(0, word_count, 10000):
-                                    chunk = " ".join(words[k : k + 10000])
+                            if word_count > 5000:
+                                # Cắt theo ký tự để giữ nguyên format (xuống dòng, khoảng trắng)
+                                for k in range(0, len(content), CHAR_LIMIT):
+                                    chunk = content[k : k + CHAR_LIMIT]
                                     rows_to_append.append([i, scraped_data['title'], chunk])
                             elif word_count > 1000 or j < chapter - 10:
-                                rows_to_append.append([i, scraped_data['title'], scraped_data['content']])
+                                rows_to_append.append([i, scraped_data['title'], content])
                             
                             if rows_to_append:
                                 worksheet.append_rows(rows_to_append)
-                                print(f"✅ Đã lưu thành công chương {i} vào Google Sheet ({len(rows_to_append)} dòng)")
+                                print(f"✅ Đã lưu thành công chương {i} vào Google Sheet")
                                 j += 1
                                 break
                             else:
