@@ -204,10 +204,12 @@ async def scrape_chapter_content(page):
     try:
         # Lấy tiêu đề chương
         title = await page.locator(title_selector).inner_text()
-        print(f"Đã tìm thấy tiêu đề: {title.strip()}")
+        # print(f"Đã tìm thấy tiêu đề: {title.strip()}")
 
         await page.wait_for_selector(content_selector)
-        print("Container nội dung đã xuất hiện. Đang chờ canvas vẽ...")
+        # print("Container nội dung đã xuất hiện. Đang chờ canvas vẽ...")
+
+        await page.wait_for_timeout(300)
 
         # === (THAY ĐỔI 2) LOGIC CHỜ MỚI - ĐÁNG TIN CẬY ===
         # Chờ cho đến khi BẤT KỲ canvas nào có thuộc tính (nghĩa là việc vẽ đã bắt đầu)
@@ -228,10 +230,10 @@ async def scrape_chapter_content(page):
             }}
         """, timeout=10000) # Cho tối đa 10 giây để BẮT ĐẦU vẽ
 
-        print("Canvas đã BẮT ĐẦU vẽ. Chờ 500ms để ổn định...")
+        # print("Canvas đã BẮT ĐẦU vẽ. Chờ 500ms để ổn định...")
         # Thêm một khoảng chờ ngắn để TẤT CẢ các canvas khác vẽ xong (nếu có)
-        # await page.wait_for_timeout(300)
-        print("Đã ổn định. Bắt đầu thu thập...")
+        await page.wait_for_timeout(300)
+        # print("Đã ổn định. Bắt đầu thu thập...")
         # =======================================================
 
 
