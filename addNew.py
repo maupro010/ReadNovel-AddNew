@@ -1,443 +1,388 @@
-#-------------------------------------------
-#hoàn thiện thông tin truyện cuối cùng list, cập nhật các chương mới của truyện mới
-#chạy bằng proxy
-#-------------------------------------------
+"""
+stv_scrape.py - GitHub Action script
+Đọc truyện mới nhất từ Google Sheet "list", scrape nội dung từ sangtacviet.app
+và lưu vào sheet riêng theo url (host/bookId).
 
-import asyncio
-from playwright.async_api import async_playwright
-import os
-import csv
-import gspread
-import re
+Thay thế vd3.py (metruyencv + Playwright) bằng requests thuần.
 
-# --- THÔNG TIN ĐĂNG NHẬP ---
-LOGIN_EMAIL = os.environ.get('LOGIN_EMAIL')
-LOGIN_PASSWORD = os.environ.get('LOGIN_PASSWORD')
-# ------------------------------
+Cấu trúc sheet "list":
+  Cột 1 (A): url          → "host/bookId"  (ví dụ: "qidian/1039142740")
+  Cột 2 (B): title
+  Cột 3 (C): author
+  Cột 4 (D): desc
+  Cột 5 (E): img_url
+  Cột 6 (F): max_chapter
+  Cột 7 (G): update
+  Cột 8 (H): id           → bookId (số nguyên)
+  Cột 9 (I): state        → "true" = cần scrape, "false" = đã xong
 
-# --- THÔNG TIN GOOGLE SHEET ---
-GOOGLE_SHEET_NAME = "https://docs.google.com/spreadsheets/d/1rCGTw4GdGlR4K-H7hDk8TjjnGh1jL3NgNZLRQ_h8jY8/edit?usp=sharing"
-CREDENTIALS_FILE = "credentials.json"
-# ------------------------------
+Cấu trúc sheet riêng của mỗi truyện (tên sheet = url, ví dụ "qidian/1039142740"):
+  Cột 1 (A): ID      → chapterId (số)
+  Cột 2 (B): NAME    → tên chương
+  Cột 3 (C): content → nội dung
 
-INIT_SCRIPT = """
-(() => {
-    // Một hàm chung để xử lý việc bắt text
-    const textCapture = function(originalMethod, ...args) {
-        const text = args[0];
-        
-        // Chỉ cần text tồn tại và không phải là chuỗi rác
-        if (text && text.trim() && !text.includes('Cwm fjordbank gly')) {
-            // 'this' là context, 'this.canvas' là thẻ <canvas> DOM
-            const canvas = this.canvas; 
-            
-            // Lấy text đã có (nếu canvas vẽ nhiều dòng) và nối thêm
-            let currentText = canvas.getAttribute('data-captured-text') || '';
-            
-            // Thêm một khoảng trắng để các từ không dính vào nhau
-            canvas.setAttribute('data-captured-text', currentText + text.trim() + ' ');
-        }
-        
-        // Luôn gọi hàm gốc
-        originalMethod.apply(this, args);
-    };
-
-    // --- Patch fillText ---
-    try {
-        const originalFillText = CanvasRenderingContext2D.prototype.fillText;
-        CanvasRenderingContext2D.prototype.fillText = function(...args) {
-            textCapture.call(this, originalFillText, ...args);
-        };
-    } catch (e) {
-        console.error('Failed to patch fillText:', e);
-    }
-
-    // --- Patch strokeText (cho chắc) ---
-    try {
-        const originalStrokeText = CanvasRenderingContext2D.prototype.strokeText;
-        CanvasRenderingContext2D.prototype.strokeText = function(...args) {
-            textCapture.call(this, originalStrokeText, ...args);
-        };
-    } catch (e) {
-        console.error('Failed to patch strokeText:', e);
-    }
-})();
+Yêu cầu:
+  - File credentials.json (Google Service Account)
+  - File stv_cookies.json (tạo bằng stv_save_cookies.py)
 """
 
-# List này sẽ chỉ lưu text từ canvas cho mỗi chương
-captured_canvas_texts = []
+import re
+import os
+import json
+import time
+import requests
+from pathlib import Path
+from bs4 import BeautifulSoup, NavigableString, Tag
 
-async def scrape_novel_detail(page):
-    """
-    Hàm này lấy tiêu đề và toàn bộ thông tin của truyện
-    và trả về dưới dạng một dictionary.
-    """
-    content_selector = '#chapter-content'
-    title_selector = 'a.font-semibold.text-lg.text-title'
-    img_selector = 'img.w-44'
-    author_selector = 'div.mb-6 a'
-    desc_selector = '#synopsis > div.text-gray-600.dark\\:text-gray-300.py-4.px-2.md\\:px-1.text-base.break-words'
-    max_seclector = '#app > div:nth-child(2) > div > main > div.space-y-5 > div.block.md\\:flex > div.mb-4.mx-auto.text-center.md\\:mx-0.md\\:text-left > div.space-x-4.mb-6.md\\:mb-8 > button:nth-child(3) > span.absolute.-right-4.-top-4 > span'
-    update_selector = '#app > div:nth-child(2) > div > main > div.space-y-5 > div.pb-3 > div.pt-6.px-4.md\\:px-2.grid.grid-cols-1.gap-4.md\\:grid-cols-3 > a:nth-child(3) > div.flex.items-center.text-xs.text-gray-400 > span'
-    id_selector = '#app > div:nth-child(2) > div > main > div.space-y-5 > div.block.md\\:flex > div.mb-4.mx-auto.text-center.md\\:mx-0.md\\:text-left > div.space-x-4.mb-6.md\\:mb-8 > div'
-    max_seclector2 = '#app > div:nth-child(2) > main > div.space-y-5 > div.block.md\\:flex > div.mb-4.mx-auto.text-center.md\\:mx-0.md\\:text-left > div.space-x-4.mb-6.md\\:mb-8 > button:nth-child(3) > span.absolute.-right-4.-top-4 > span'
-    update_selector2 = '#app > div:nth-child(2) > main > div.space-y-5 > div.pb-3 > div.pt-6.px-4.md\\:px-2.grid.grid-cols-1.gap-4.md\\:grid-cols-3 > a:nth-child(3) > div.flex.items-center.text-xs.text-gray-400 > span'
-    id_selector2 = '#app > div:nth-child(2) > main > div.space-y-5 > div.block.md\\:flex > div.mb-4.mx-auto.text-center.md\\:mx-0.md\\:text-left > div.space-x-4.mb-6.md\\:mb-8 > div'
-    
-    # Khởi tạo tất cả các biến với giá trị mặc định là chuỗi rỗng
-    title = ""
-    img = ""
-    author = ""
-    desc = ""
-    maxChapter = ""
-    update = ""
-    target_id = ""
+import gspread
 
-    try:
-        # --- Lấy tiêu đề ---
-        try:
-            # Tối ưu: .inner_text() đã bao gồm auto-wait, không cần .wait_for_selector()
-            title = await page.locator(title_selector).inner_text(timeout=30000)
-            print(f"Đã tìm thấy title: {title.strip()}")
-        except Exception as e:
-            print(f"⚠️ Lỗi khi lấy title: {e}")
+# ── Cấu hình ────────────────────────────────────────────────────────────────
+COOKIE_FILE          = "stv_cookies.json"
+CREDENTIALS_FILE     = "credentials.json"
+SPREADSHEET_ID       = "1rCGTw4GdGlR4K-H7hDk8TjjnGh1jL3NgNZLRQ_h8jY8"
+STV_BASE             = "https://sangtacviet.app"
+CHAR_LIMIT           = 35000   # giới hạn ký tự mỗi ô Google Sheets
+DELAY_BETWEEN_CHAPS  = 0.8     # giây nghỉ giữa các chương
+MAX_RETRIES          = 3       # số lần retry khi lỗi mạng
 
-        # --- Lấy img url ---
-        try:
-            # .get_attribute() cũng đã bao gồm auto-wait
-            img_url = await page.locator(img_selector).get_attribute("src")
-            if img_url: # Phải kiểm tra None trước khi gán
-                img = img_url
-                print(f"Đã tìm thấy img: {img.strip()}")
-            else:
-                print("⚠️ Đã tìm thấy img_selector, nhưng không có thuộc tính 'src'.")
-        except Exception as e:
-            print(f"⚠️ Lỗi khi lấy img: {e}")
-        
-        # --- Lấy author ---
-        try:
-            author = await page.locator(author_selector).inner_text(timeout=30000)
-            print(f"Đã tìm thấy author: {author.strip()}")
-        except Exception as e:
-            print(f"⚠️ Lỗi khi lấy author: {e}")
-        
-        # --- Lấy desc ---
-        try:
-            desc = await page.locator(desc_selector).inner_text(timeout=30000)
-            print(f"Đã tìm thấy desc: {desc.strip()}")
-        except Exception as e:
-            print(f"⚠️ Lỗi khi lấy desc: {e}")
-
-        # --- Lấy maxChapter ---
-        try:
-            maxChapter = await page.locator(max_seclector2).inner_text(timeout=30000)
-            print(f"Đã tìm thấy maxChapter: {maxChapter.strip()}")
-        except:
-            try:
-                maxChapter = await page.locator(max_seclector).inner_text(timeout=30000)
-                print(f"Đã tìm thấy maxChapter: {maxChapter.strip()}")
-            except Exception as e:
-                print(f"⚠️ Lỗi khi lấy maxChapter: {e}")
-        
-        # --- Lấy update ---
-        try:
-            update = await page.locator(update_selector2).inner_text(timeout=30000)
-            print(f"Đã tìm thấy update: {update.strip()}")
-        except:
-            try:
-                update = await page.locator(update_selector).inner_text(timeout=30000)
-                print(f"Đã tìm thấy update: {update.strip()}")
-            except Exception as e:
-                print(f"⚠️ Lỗi khi lấy update: {e}")
-        
-        # --- Lấy ID (data-x-data) ---
-        try:
-            data_x_data = await page.locator(id_selector2).get_attribute("data-x-data")
-            if data_x_data:
-                match = re.search(r'\(([^)]+)\)', data_x_data)
-                if match:
-                    target_id = match.group(1).strip()
-                    print(f"Đã lấy được ID (Dùng Regex): {target_id}")
-                else:
-                    print("⚠️ Không tìm thấy ID trong thuộc tính data-x-data.")
-            else:
-                print("⚠️ Không tìm thấy thuộc tính data-x-data.")
-        except:
-            try:
-                data_x_data = await page.locator(id_selector).get_attribute("data-x-data")
-                if data_x_data:
-                    match = re.search(r'\(([^)]+)\)', data_x_data)
-                    if match:
-                        target_id = match.group(1).strip()
-                        print(f"Đã lấy được ID (Dùng Regex): {target_id}")
-                    else:
-                        print("⚠️ Không tìm thấy ID trong thuộc tính data-x-data.")
-                else:
-                    print("⚠️ Không tìm thấy thuộc tính data-x-data.")
-            except Exception as e:
-                print(f"⚠️ Lỗi khi lấy ID (data-x-data): {e}")
-        
-        # Trả về dictionary, .strip() bây giờ đã an toàn vì tất cả đều là chuỗi
-        return {
-            "title": title.strip(), 
-            "img": img.strip(), 
-            "author": author.strip(), 
-            "desc": desc.strip(), 
-            "maxChapter": maxChapter.strip(), 
-            "update": update.strip(), 
-            "id": target_id.strip()
-        }
-
-    except Exception as e:
-        # Khối except bên ngoài này sẽ bắt các lỗi thảm họa (ví dụ: page bị đóng)
-        print(f"❌ Lỗi nghiêm trọng khi lấy chi tiết truyện: {e}")
-        return None
-
-async def scrape_chapter_content(page):
-    """
-    Hàm này lấy tiêu đề và nội dung chương.
-    1. Dùng wait_for_function để đảm bảo canvas đã được INIT_SCRIPT xử lý.
-    2. Dùng evaluate để đọc DOM và thuộc tính 'data-captured-text' từ canvas.
-    """
-    content_selector = '#chapter-content'
-    title_selector = 'h2.text-center'
-    try:
-        # Lấy tiêu đề chương
-        title = await page.locator(title_selector).inner_text()
-        # print(f"Đã tìm thấy tiêu đề: {title.strip()}")
-
-        await page.wait_for_selector(content_selector)
-        # print("Container nội dung đã xuất hiện. Đang chờ canvas vẽ...")
-
-        await page.wait_for_timeout(300)
-
-        # === (THAY ĐỔI 2) LOGIC CHỜ MỚI - ĐÁNG TIN CẬY ===
-        # Chờ cho đến khi BẤT KỲ canvas nào có thuộc tính (nghĩa là việc vẽ đã bắt đầu)
-        # Hoặc cho đến khi không tìm thấy canvas nào
-        await page.wait_for_function(f"""
-            () => {{
-                const container = document.querySelector('{content_selector}');
-                if (!container) return false;
-                
-                const canvases = container.querySelectorAll('canvas');
-                
-                // Nếu không có canvas, coi như đã xong (trả về true)
-                if (canvases.length === 0) return true; 
-                
-                // Trả về true nếu BẤT KỲ (some) canvas nào có thuộc tính
-                // (nghĩa là INIT_SCRIPT đã bắt đầu hoạt động)
-                return Array.from(canvases).some(canvas => canvas.hasAttribute('data-captured-text'));
-            }}
-        """, timeout=10000) # Cho tối đa 10 giây để BẮT ĐẦU vẽ
-
-        # print("Canvas đã BẮT ĐẦU vẽ. Chờ 500ms để ổn định...")
-        # Thêm một khoảng chờ ngắn để TẤT CẢ các canvas khác vẽ xong (nếu có)
-        await page.wait_for_timeout(300)
-        # print("Đã ổn định. Bắt đầu thu thập...")
-        # =======================================================
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+    "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
+    "sec-ch-ua": '"Google Chrome";v="120", "Chromium";v="120", "Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+}
+# ────────────────────────────────────────────────────────────────────────────
 
 
-        # === (THAY ĐỔI 3) LOGIC EVALUATE MỚI - ĐỌC ATTRIBUTE ===
-        # Logic này không cần mảng toàn cục nữa, chỉ cần đọc DOM
-        full_content = await page.evaluate(f"""
-        (async () => {{
-            const contentDiv = document.querySelector('{content_selector}');
-            if (!contentDiv) return "[LỖI: Không tìm thấy container nội dung]";
-            
-            // Không cần mảng toàn cục, không cần iterator
-            
-            const final_content_parts = [];
-            const nodes = Array.from(contentDiv.childNodes);
-            
-            nodes.forEach(node => {{
-                if (node.nodeType === 3) {{ // 3 == Node.TEXT_NODE (Text thô)
-                    const text = node.textContent.trim();
-                    if (text) final_content_parts.push(text);
-                
-                }} else if (node.nodeType === 1) {{ // 1 == Node.ELEMENT_NODE (Thẻ HTML)
-                    
-                    if (node.tagName.toUpperCase() === 'CANVAS') {{
-                        // ĐỌC TRỰC TIẾP TỪ THUỘC TÍNH
-                        const canvasText = node.getAttribute('data-captured-text');
-                        if (canvasText) {{
-                            final_content_parts.push(canvasText.trim());
-                        }}
+# ══════════════════════════════════════════════════════════════════════════════
+# COOKIES
+# ══════════════════════════════════════════════════════════════════════════════
 
-                    }} else if (node.tagName.toUpperCase() === 'BR') {{
-                        final_content_parts.push('\\n');
-                    }} else if (node.tagName.toUpperCase() === 'DIV') {{
-                        const divText = node.textContent.trim();
-                        if (divText) final_content_parts.push(divText);
-                    }}
-                }}
-            }});
-            
-            let result = final_content_parts.join('\\n').replace(/\\n+/g, '\\n\\n');
-            // Sửa lỗi f-string/regex: dùng {{...}}
-            result = result.replace(/(\\n\\n ?){{2,}}/g, '\\n\\n');
-            
-            return result;
-        }})()
-        """)
-        
-        return { "title": title.strip(), "content": full_content.strip().replace("·","") }
-
-    except Exception as e:
-        print(f"Lỗi khi lấy nội dung chương: {e}")
-        return None
-
-async def main():
-    """
-    Hàm chính điều khiển toàn bộ quá trình: đăng nhập, duyệt và lưu chương.
-    """
-    # Lấy thông tin proxy từ biến môi trường
-    PROXY_SERVER = os.environ.get('PROXY_SERVER')
-    PROXY_USER = os.environ.get('PROXY_USER')
-    PROXY_PASS = os.environ.get('PROXY_PASS')
-
-    proxy_settings = None
-    if PROXY_SERVER:
-        proxy_settings = {
-            "server": f"http://{PROXY_SERVER}",
-            "username": PROXY_USER,
-            "password": PROXY_PASS
-        }
-        print(f"--- Đang sử dụng proxy: {PROXY_SERVER} ---")
-    else:
-        print("--- Không tìm thấy thông tin proxy, chạy không qua proxy ---")
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            proxy=proxy_settings
+def load_cookies(session: requests.Session):
+    """Nạp cookies từ stv_cookies.json vào session."""
+    if not Path(COOKIE_FILE).exists():
+        raise FileNotFoundError(
+            f"Không tìm thấy {COOKIE_FILE}. "
+            "Hãy chạy stv_save_cookies.py trước."
         )
-        context = await browser.new_context()
-        page = await context.new_page()
-        page.set_default_timeout(60000) # 60 giây
-        await page.add_init_script(INIT_SCRIPT)
+    with open(COOKIE_FILE, encoding="utf-8") as f:
+        cookies = json.load(f)
+    for c in cookies:
+        session.cookies.set(
+            c["name"], c["value"],
+            domain=c.get("domain", "sangtacviet.app").lstrip("."),
+            path=c.get("path", "/"),
+        )
+    print(f"  [cookies] Loaded {len(cookies)} cookies")
+
+
+def refresh_ac_cookies(session: requests.Session, page_url: str):
+    """
+    GET trang chương để lấy _ac/_gac mới (thay đổi mỗi session).
+    Giữ nguyên _acx, PHPSESSID và các cookies dài hạn từ file.
+    """
+    r = session.get(page_url, headers=HEADERS, timeout=30)
+    html = r.text
+    gac_m = re.search(r'document\.cookie\s*=\s*"_gac=([^;]+);', html)
+    ac_m  = re.search(r'document\.cookie\s*=\s*"_ac=([^;]+);',  html)
+    if gac_m:
+        session.cookies.set("_gac", gac_m.group(1), domain="sangtacviet.app", path="/")
+    if ac_m:
+        session.cookies.set("_ac",  ac_m.group(1),  domain="sangtacviet.app", path="/")
+    session.cookies.set("foreignlang", "vi",   domain="sangtacviet.app", path="/")
+    session.cookies.set("transmode",   "name", domain="sangtacviet.app", path="/")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LẤY DANH SÁCH CHƯƠNG TỪ TRANG STV
+# ══════════════════════════════════════════════════════════════════════════════
+
+def fetch_chapter_list(book_host: str, book_id: str) -> list[dict]:
+    """
+    Fetch trang chi tiết truyện STV bằng requests (HTML tĩnh, không cần JS).
+    Trả về list[{"id": chapterId, "name": chapterName}].
+
+    URL trang: https://sangtacviet.app/truyen/{host}/1/{bookId}/
+    Selector : a.listchapitem  →  title = tên chương, id = chapterId
+               Chương free không có id → dùng index thứ tự
+    """
+    page_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/"
+    print(f"  [detail] GET {page_url}")
+
+    try:
+        r = requests.get(page_url, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"  [detail] ERROR: {e}")
+        return []
+
+    from bs4 import BeautifulSoup
+    doc = BeautifulSoup(r.text, "html.parser")
+    items = doc.select("a.listchapitem")
+
+    chapters = []
+    auto_index = 1
+    for a in items:
+        name = a.get("title", "").strip() or a.text.strip()
+        if not name:
+            auto_index += 1
+            continue
+        cid = a.get("id", "").strip() or str(auto_index)
+        chapters.append({"id": cid, "name": name})
+        auto_index += 1
+
+    print(f"  [detail] Found {len(chapters)} chapters")
+    return chapters
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LẤY NỘI DUNG MỘT CHƯƠNG
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_chapter_content(
+    session: requests.Session,
+    book_host: str,
+    book_id: str,
+    chapter_id: str,
+) -> tuple[str, str] | None:
+    """
+    Lấy nội dung chương qua POST API STV.
+    Trả về (chapter_title, content) hoặc None nếu thất bại.
+
+    Luồng:
+      1. GET trang chương để refresh _ac/_gac
+      2. POST index.php?bookid=...&h=...&c=...&ngmar=readc&sajax=readchapter
+      3. Parse JSON → extract text từ HTML
+    """
+    chapter_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chapter_id}/"
+
+    # Bước 1: refresh cookie _ac/_gac
+    refresh_ac_cookies(session, chapter_url)
+
+    # Bước 2: POST API
+    api_url = (
+        f"{STV_BASE}/index.php"
+        f"?bookid={book_id}&h={book_host}&c={chapter_id}"
+        f"&ngmar=readc&sajax=readchapter&sty=1&exts="
+    )
+    try:
+        resp = session.post(
+            api_url,
+            data="",
+            headers={
+                **HEADERS,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin":       STV_BASE,
+                "Referer":      chapter_url,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"    [POST] ERROR: {e}")
+        return None
+
+    # Bước 3: parse JSON
+    raw = resp.text
+    if not raw.startswith("{"):
+        idx = raw.find('{"')
+        if idx < 0:
+            print(f"    [POST] Response không phải JSON: {raw[:100]}")
+            return None
+        raw = raw[idx:]
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"    [POST] JSON decode error: {e}")
+        return None
+
+    if str(data.get("code")) != "0":
+        err = data.get("err", data.get("msg", "unknown"))
+        print(f"    [POST] API code={data.get('code')}: {err}")
+        return None
+
+    chapter_title = data.get("chaptername", "").strip()
+    raw_html      = data.get("data", "")
+    content       = extract_text(raw_html)
+    return chapter_title, content
+
+
+def extract_text(raw_html: str) -> str:
+    """Parse HTML nội dung chương STV → plain text."""
+    soup = BeautifulSoup(raw_html, "html.parser")
+    parts = []
+
+    def walk(node):
+        if isinstance(node, NavigableString):
+            t = str(node).strip()
+            if t:
+                parts.append(t)
+        elif isinstance(node, Tag):
+            if node.name in ("script", "style", "header"):
+                return
+            if node.name == "br":
+                parts.append("\n")
+                return
+            if node.name == "i" and node.get("h"):
+                parts.append(node.get_text(strip=True))
+                return
+            for child in node.children:
+                walk(child)
+
+    walk(soup)
+
+    result = ""
+    for p in parts:
+        if p == "\n":
+            result = result.rstrip(" ") + "\n"
+        elif result.endswith("\n") or not result:
+            result += p
+        elif p in (')', ']', '】', '.', ',', '!', '?', ':', ';'):
+            result += p
+        else:
+            result += " " + p
+
+    return re.sub(r'\n{3,}', '\n\n', result).strip().replace("·", "")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main():
+    # ── Kết nối Google Sheets ────────────────────────────────────────────────
+    print("[Sheets] Đang kết nối...")
+    gc = gspread.service_account(filename=CREDENTIALS_FILE)
+    sh = gc.open_by_key(SPREADSHEET_ID)
+    sheet_list = sh.worksheet("list")
+    print("[Sheets] Kết nối thành công!")
+
+    # ── Đọc sheet list, lấy truyện cần scrape (state = "true") ──────────────
+    # Lấy truyện cuối cùng có state = "true" (giống logic vd3.py cũ)
+    all_urls   = sheet_list.col_values(1)[1:]   # bỏ header
+    all_states = sheet_list.col_values(9)[1:]   # cột I
+
+    # Lấy tất cả truyện có state = "true" để xử lý
+    pending = [
+        (i + 2, url)                            # +2 vì bỏ header + 0-index
+        for i, (url, state) in enumerate(zip(all_urls, all_states))
+        if state.strip().lower() == "true" and url.strip()
+    ]
+
+    if not pending:
+        print("[Main] Không có truyện nào cần scrape.")
+        return
+
+    print(f"[Main] Tìm thấy {len(pending)} truyện cần scrape.")
+
+    # ── Khởi tạo session với cookies STV ────────────────────────────────────
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    load_cookies(session)
+
+    # ── Xử lý từng truyện ───────────────────────────────────────────────────
+    for row_index, novel_url in pending:
+        novel_url = novel_url.strip()
+        parts = novel_url.split("/")
+        if len(parts) < 2:
+            print(f"[Main] URL không hợp lệ: {novel_url}, bỏ qua.")
+            continue
+
+        book_host = parts[0]   # qidian / fanqie / dich ...
+        book_id   = parts[1]   # 1039142740
+
+        print(f"\n{'='*60}")
+        print(f"[Novel] {novel_url}  (host={book_host}, id={book_id})")
+
+        # ── Lấy/tạo worksheet cho truyện này ────────────────────────────────
+        # Tên sheet = url truyện (ví dụ "qidian/1039142740")
+        # Dấu "/" không hợp lệ trong tên sheet Google → dùng bookId làm tên
+        sheet_name = book_id
         try:
-            # --- PHẦN 1: ĐĂNG NHẬP (Chỉ chạy một lần) ---
-            print("Bắt đầu quá trình đăng nhập...")
-            await page.goto("https://metruyencv.com", wait_until="domcontentloaded")
-            
-            menu_icon_locator = page.locator('svg:has(path[d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"])')
-            await menu_icon_locator.wait_for(state="visible")
-            await menu_icon_locator.click()
-            await page.get_by_role("button", name="Đăng nhập").click()
-            await page.get_by_placeholder("email").fill(LOGIN_EMAIL)
-            await page.get_by_placeholder("password").fill(LOGIN_PASSWORD)
-            await page.get_by_role("button", name="Đăng nhập").click()
-            print("Đăng nhập thành công!")
-            
-            # --- PHẦN 0: KẾT NỐI VÀ KIỂM TRA GOOGLE SHEET ---
-            print("Đang kết nối tới Google Sheets...")
-            gc = gspread.service_account(filename=CREDENTIALS_FILE)
-            sh = gc.open_by_url(GOOGLE_SHEET_NAME)
-            print("Kết nối thành công!")
-            sheet_list = sh.worksheet("list")
-            existing_stt_list = sheet_list.col_values(1)
-            list_novel = existing_stt_list[1:]
-            ID = sheet_list.col_values(1)[-1]
-            max_chapter = sheet_list.col_values(6)[-1]
+            worksheet = sh.worksheet(sheet_name)
+            print(f"  [Sheets] Dùng sheet có sẵn: '{sheet_name}'")
+        except gspread.WorksheetNotFound:
+            print(f"  [Sheets] Tạo sheet mới: '{sheet_name}'")
+            worksheet = sh.add_worksheet(title=sheet_name, rows="1", cols="3")
+            worksheet.append_row(["ID", "NAME", "content"])
 
-            sheet_title = ID
-            existing_chapters = set()
-            try:
-                worksheet = sh.worksheet(sheet_title)
-                print(f"Đã tìm thấy sheet có sẵn: '{sheet_title}'")
-                existing_stt_list = worksheet.col_values(1)
-                existing_chapters = {int(stt) for stt in existing_stt_list if stt.isdigit()}
-                print(f"Các chương đã có trong sheet: {sorted(list(existing_chapters))}")
-            except gspread.WorksheetNotFound:
-                print(f"Không tìm thấy sheet. Đang tạo sheet mới: '{sheet_title}'")
-                worksheet = sh.add_worksheet(title=sheet_title, rows="1", cols="3")
-                worksheet.append_row(['ID', 'NAME', 'content'])
-            
-            print("✅ Kết nối thành công.")
-            
-            BASE_URL = "https://metruyencv.com/truyen/"+ID+"/chuong-{}"
-            # --- PHẦN 2: DUYỆT QUA CÁC CHƯƠNG ---
-            i = 1
-            j = 1
-            chapter = int(max_chapter)
-            
-            while j <= chapter and i < chapter + 20:
-                # Bỏ qua nếu chương đã tồn tại
-                if i in existing_chapters:
-                    i += 1
-                    j += 1
-                    continue
+        # ── Lấy danh sách chương đã có ──────────────────────────────────────
+        existing_ids = set()
+        existing_col = worksheet.col_values(1)
+        for val in existing_col[1:]:   # bỏ header
+            val = val.strip()
+            if val:
+                existing_ids.add(val)
+        print(f"  [Sheets] Đã có {len(existing_ids)} chương")
 
-                chapter_url = BASE_URL.format(i)
-                print(f"\n--- Đang xử lý chương {i}: {chapter_url} ---")
-                
-                # Vòng lặp retry vô tận cho đến khi thành công hoặc gặp 404
-                while True:
-                    try:
-                        captured_canvas_texts.clear() # Xóa buffer cũ
-                        response = await page.goto(chapter_url, wait_until="domcontentloaded")
+        # ── Fetch danh sách chương từ trang STV ─────────────────────────────
+        chapter_list = fetch_chapter_list(book_host, book_id)
+        if not chapter_list:
+            print(f"  [Novel] Không lấy được danh sách chương, bỏ qua.")
+            continue
 
-                        # === LOGIC 1: XỬ LÝ 404 ===
-                        if response and response.status == 404:
-                            worksheet.append_row([i, 'title', 'content'])
-                            print(f"⚠️ Bỏ qua chương {i} do lỗi 404 (Không tồn tại).")
-                            # Thoát retry để tăng i lên chương tiếp theo
-                            break 
+        # ── Scrape từng chương ───────────────────────────────────────────────
+        saved = 0
+        for chap in chapter_list:
+            chap_id   = chap["id"]
+            chap_name = chap["name"]
 
-                        # === LOGIC 2: LẤY NỘI DUNG ===
-                        scraped_data = await scrape_chapter_content(page)
+            # Bỏ qua chương đã có
+            if chap_id in existing_ids:
+                continue
 
-                        if scraped_data:
-                            content = scraped_data['content']
-                            word_count = len(content.split())
-                            rows_to_append = []
-                            # 35.000 ký tự thường tương đương 5.000 - 6.000 từ (an toàn cho giới hạn 50.000 của Sheets)
-                            CHAR_LIMIT = 35000 
-                            
-                            if word_count > 5000:
-                                # Cắt theo ký tự để giữ nguyên format (xuống dòng, khoảng trắng)
-                                for k in range(0, len(content), CHAR_LIMIT):
-                                    chunk = content[k : k + CHAR_LIMIT]
-                                    rows_to_append.append([i, scraped_data['title'], chunk])
-                            elif word_count > 1000 or j < chapter - 10:
-                                rows_to_append.append([i, scraped_data['title'], content])
-                            
-                            if rows_to_append:
-                                worksheet.append_rows(rows_to_append)
-                                print(f"✅ Đã lưu thành công chương {i} vào Google Sheet")
-                                j += 1
-                                break
-                            else:
-                                print(f"⚠️ Bỏ qua chương {i} do chương vip.")
-                                j += 1
-                                break 
-                        else:
-                            # === LOGIC 3: RETRY NẾU LỖI KHÁC ===
-                            print(f"🔄 Không lấy được nội dung chương {i}. Đang tải lại trang và thử lại...")
-                            await asyncio.sleep(2) # Nghỉ 2s tránh spam request
-                            # Vòng lặp while True sẽ tự chạy lại từ đầu (goto)
+            print(f"  [Chap] {chap_name} (id={chap_id})")
 
-                    except Exception as e:
-                        print(f"❌ Lỗi kết nối/ngoại lệ: {e}. Đang thử lại...")
-                        await asyncio.sleep(2)
+            # Retry loop
+            result = None
+            for attempt in range(1, MAX_RETRIES + 1):
+                result = get_chapter_content(session, book_host, book_id, chap_id)
+                if result is not None:
+                    break
+                print(f"    [Retry {attempt}/{MAX_RETRIES}] Thất bại, thử lại...")
+                time.sleep(2)
 
-                # Tăng số thứ tự chương để duyệt tiếp
-                i += 1
-                
+            if result is None:
+                print(f"    [SKIP] Bỏ qua sau {MAX_RETRIES} lần thử")
+                # Ghi placeholder để không retry mãi
+                worksheet.append_row([chap_id, chap_name, ""])
+                time.sleep(DELAY_BETWEEN_CHAPS)
+                continue
 
-        except Exception as e:
-            print(f"❌ Đã xảy ra lỗi nghiêm trọng: {e}")
-            try:
-                await page.screenshot(path='screenshots/00_ERROR.png')
-                print("Đã chụp ảnh màn hình lỗi.")
-            except Exception as screenshot_error:
-                print(f"Không thể chụp ảnh màn hình: {screenshot_error}")
+            _, content = result
 
-        finally:
-            print("\nQuá trình đã hoàn tất. Đóng trình duyệt.")
-            sheet_list.update_cell(list_novel.index(ID)+2, 9, 'false')
-            await browser.close()
+            # Chia nhỏ nếu content quá dài (giới hạn Google Sheets ~50k ký tự/ô)
+            if len(content) > CHAR_LIMIT:
+                rows = []
+                for k in range(0, len(content), CHAR_LIMIT):
+                    chunk = content[k: k + CHAR_LIMIT]
+                    rows.append([chap_id, chap_name, chunk])
+                worksheet.append_rows(rows)
+            else:
+                worksheet.append_row([chap_id, chap_name, content])
 
-# Chạy script
+            saved += 1
+            print(f"    [OK] Đã lưu ({len(content)} ký tự)")
+            time.sleep(DELAY_BETWEEN_CHAPS)
+
+        print(f"  [Novel] Hoàn tất: lưu {saved} chương mới")
+
+        # ── Đánh dấu đã xong trong sheet list ───────────────────────────────
+        sheet_list.update_cell(row_index, 9, "false")
+        print(f"  [Sheets] Đánh dấu state = false cho row {row_index}")
+
+    print("\n[Main] Hoàn tất tất cả truyện.")
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
