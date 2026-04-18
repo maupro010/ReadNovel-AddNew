@@ -106,9 +106,32 @@ def refresh_ac_cookies(session: requests.Session, page_url: str):
 # LẤY DANH SÁCH CHƯƠNG TỪ TRANG STV
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fetch_chapter_list(book_host: str, book_id: str) -> list[dict]:
+def renew_session(session: requests.Session):
     """
-    Fetch trang chi tiết truyện STV bằng requests (HTML tĩnh, không cần JS).
+    Lấy PHPSESSID mới bằng cách GET trang chủ STV.
+    PHPSESSID là session cookie — hết hạn khi server restart.
+    Gọi hàm này một lần trước khi fetch bất kỳ trang nào.
+    """
+    print("  [session] Renewing PHPSESSID via homepage...")
+    try:
+        r = session.get(STV_BASE + "/", headers=HEADERS, timeout=15)
+        # requests tự động lưu Set-Cookie từ response vào session
+        new_php = session.cookies.get("PHPSESSID", domain="sangtacviet.app")
+        print(f"  [session] New PHPSESSID: {new_php[:10]}..." if new_php else "  [session] No PHPSESSID in response")
+        # Cũng refresh _ac/_gac luôn từ homepage
+        gac_m = re.search(r'document\.cookie\s*=\s*"_gac=([^;]+);', r.text)
+        ac_m  = re.search(r'document\.cookie\s*=\s*"_ac=([^;]+);',  r.text)
+        if gac_m:
+            session.cookies.set("_gac", gac_m.group(1), domain="sangtacviet.app", path="/")
+        if ac_m:
+            session.cookies.set("_ac",  ac_m.group(1),  domain="sangtacviet.app", path="/")
+    except Exception as e:
+        print(f"  [session] WARNING renew failed: {e}")
+
+
+def fetch_chapter_list(session: requests.Session, book_host: str, book_id: str) -> list[dict]:
+    """
+    Fetch trang chi tiết truyện STV bằng session (có cookies).
     Trả về list[{"id": chapterId, "name": chapterName}].
 
     URL trang: https://sangtacviet.app/truyen/{host}/1/{bookId}/
@@ -119,13 +142,17 @@ def fetch_chapter_list(book_host: str, book_id: str) -> list[dict]:
     print(f"  [detail] GET {page_url}")
 
     try:
-        r = requests.get(page_url, headers=HEADERS, timeout=15)
+        # Dùng session (có cookies) thay vì requests.get trực tiếp
+        r = session.get(page_url, headers=HEADERS, timeout=15)
+        if r.status_code == 403:
+            print(f"  [detail] 403 Forbidden — thử renew session rồi retry...")
+            renew_session(session)
+            r = session.get(page_url, headers=HEADERS, timeout=15)
         r.raise_for_status()
     except Exception as e:
         print(f"  [detail] ERROR: {e}")
         return []
 
-    from bs4 import BeautifulSoup
     doc = BeautifulSoup(r.text, "html.parser")
     items = doc.select("a.listchapitem")
 
@@ -289,6 +316,8 @@ def main():
     session = requests.Session()
     session.headers.update(HEADERS)
     load_cookies(session)
+    # Renew PHPSESSID ngay lập tức — session cookie này hết hạn sau mỗi lần restart server
+    renew_session(session)
 
     # ── Xử lý từng truyện ───────────────────────────────────────────────────
     for row_index, novel_url in pending:
@@ -326,7 +355,7 @@ def main():
         print(f"  [Sheets] Đã có {len(existing_ids)} chương")
 
         # ── Fetch danh sách chương từ trang STV ─────────────────────────────
-        chapter_list = fetch_chapter_list(book_host, book_id)
+        chapter_list = fetch_chapter_list(session, book_host, book_id)
         if not chapter_list:
             print(f"  [Novel] Không lấy được danh sách chương, bỏ qua.")
             continue
