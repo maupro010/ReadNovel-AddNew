@@ -20,18 +20,19 @@ jobs:
         GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
       run: |
         echo "$GOOGLE_CREDENTIALS" > credentials.json
-        echo "Da tao file credentials.json"
 
     - name: 4. Tao file stv_cookies.json
       env:
         STV_COOKIES: ${{ secrets.STV_COOKIES }}
       run: |
         echo "$STV_COOKIES" > stv_cookies.json
-        echo "Da tao file stv_cookies.json"
 
     - name: 5. Cai dat thu vien Python
       run: |
-        pip install gspread requests beautifulsoup4
+        pip install gspread requests beautifulsoup4 playwright
 
-    - name: 6. Chay script Python
-      run: python addNew.py
+    - name: 6. Cai dat Chromium cho Playwright
+      run: playwright install chromium --with-deps
+
+    - name: 7. Chay script Python
+      run: python stv_scrape.py
