@@ -42,7 +42,7 @@ CREDENTIALS_FILE     = "credentials.json"
 SPREADSHEET_ID       = "1rCGTw4GdGlR4K-H7hDk8TjjnGh1jL3NgNZLRQ_h8jY8"
 STV_BASE             = "https://sangtacviet.app"
 CHAR_LIMIT           = 35000   # giới hạn ký tự mỗi ô Google Sheets
-DELAY_BETWEEN_CHAPS  = 3.0    # giây nghỉ giữa các chương (tăng từ 0.8 để tránh rate limit)
+DELAY_BETWEEN_CHAPS  = 30.0    # giây nghỉ giữa các chương (tăng từ 0.8 để tránh rate limit)
 DELAY_ON_RATELIMIT   = 30.0   # giây nghỉ khi bị rate limit (code=21)
 REFRESH_AC_EVERY     = 5      # refresh _ac sau mỗi N chương thành công
 MAX_RETRIES          = 3       # số lần retry khi lỗi mạng
@@ -71,41 +71,22 @@ HEADERS = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_cookies(session: requests.Session):
-    """
-    Nạp cookies dài hạn từ stv_cookies.json vào session.
-    Chỉ load các cookies có hạn dài (>= 30 ngày) hoặc _acx/_ga* dài hạn.
-    Bỏ qua PHPSESSID, _ac, _gac, _gid, hstamp — những cái này sẽ được tự động cấp.
-    """
-    # Cookies ngắn hạn — bỏ qua, sẽ tự động lấy mới
-    SHORT_LIVED = {"PHPSESSID", "_ac", "_gac", "_gid", "hstamp",
-                   "_gat_gtag_UA_145395004_1", "cookieenabled"}
-
+    """Nạp toàn bộ cookies từ stv_cookies.json vào session."""
     if not Path(COOKIE_FILE).exists():
-        raise FileNotFoundError(
-            f"Không tìm thấy {COOKIE_FILE}. "
-            "Chỉ cần file chứa _acx — xem hướng dẫn."
-        )
+        raise FileNotFoundError(f"Không tìm thấy {COOKIE_FILE}.")
     with open(COOKIE_FILE, encoding="utf-8") as f:
         cookies = json.load(f)
-
-    loaded = 0
     for c in cookies:
-        if c["name"] in SHORT_LIVED:
-            continue
         session.cookies.set(
             c["name"], c["value"],
             domain=c.get("domain", "sangtacviet.app").lstrip("."),
             path=c.get("path", "/"),
         )
-        loaded += 1
-
-    # _acx là cookie quan trọng nhất — kiểm tra có không
     acx = session.cookies.get("_acx", domain="sangtacviet.app")
-    if not acx:
-        raise ValueError("❌ Không tìm thấy _acx trong cookies file! Cần cập nhật stv_cookies.json.")
-
-    print(f"  [cookies] Loaded {loaded} long-lived cookies | _acx={acx[:15]}...")
-    print(f"  [cookies] PHPSESSID/_ac/_gac sẽ được tự động lấy mới")
+    php = session.cookies.get("PHPSESSID", domain="sangtacviet.app")
+    ac  = session.cookies.get("_ac",  domain="sangtacviet.app")
+    print(f"  [cookies] Loaded {len(cookies)} cookies")
+    print(f"  [cookies] _acx={acx[:16] if acx else 'N/A'}  PHPSESSID={php[:12] if php else 'N/A'}  _ac={ac[:16] if ac else 'N/A'}")
 
 
 def refresh_ac_cookies(session: requests.Session, page_url: str):
@@ -271,8 +252,9 @@ def get_chapter_content(
     """
     chapter_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chapter_id}/"
 
-    # Bước 1: refresh cookie _ac/_gac
+    # Bước 1: refresh _ac qua Set-Cookie + cập nhật hstamp
     refresh_ac_cookies(session, chapter_url)
+    session.cookies.set("hstamp", str(int(time.time())), domain="sangtacviet.app", path="/")
 
     # Bước 2: POST API
     api_url = (
@@ -398,9 +380,21 @@ def main():
     # ── Khởi tạo session với cookies STV ────────────────────────────────────
     session = requests.Session()
     session.headers.update(HEADERS)
+
+    # Proxy support (đọc từ env vars, giống vd3.py cũ)
+    proxy_server = os.environ.get("PROXY_SERVER")
+    proxy_user   = os.environ.get("PROXY_USER")
+    proxy_pass   = os.environ.get("PROXY_PASS")
+    if proxy_server:
+        proxy_url = f"http://{proxy_user}:{proxy_pass}@{proxy_server}" if proxy_user else f"http://{proxy_server}"
+        session.proxies = {"http": proxy_url, "https": proxy_url}
+        print(f"[Proxy] Đang dùng proxy: {proxy_server}")
+    else:
+        print("[Proxy] Không có proxy, dùng IP trực tiếp")
+
     load_cookies(session)
-    # Renew PHPSESSID ngay lập tức — session cookie này hết hạn sau mỗi lần restart server
-    renew_session(session)
+    # Không renew session — dùng nguyên PHPSESSID từ file cookies
+    # PHPSESSID phải khớp với _acx trên server
 
     # ── Xử lý từng truyện ───────────────────────────────────────────────────
     for row_index, novel_url in pending:
