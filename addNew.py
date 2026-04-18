@@ -42,23 +42,26 @@ CREDENTIALS_FILE     = "credentials.json"
 SPREADSHEET_ID       = "1rCGTw4GdGlR4K-H7hDk8TjjnGh1jL3NgNZLRQ_h8jY8"
 STV_BASE             = "https://sangtacviet.app"
 CHAR_LIMIT           = 35000   # giới hạn ký tự mỗi ô Google Sheets
-DELAY_BETWEEN_CHAPS  = 0.8     # giây nghỉ giữa các chương
+DELAY_BETWEEN_CHAPS  = 3.0    # giây nghỉ giữa các chương (tăng từ 0.8 để tránh rate limit)
+DELAY_ON_RATELIMIT   = 30.0   # giây nghỉ khi bị rate limit (code=21)
+REFRESH_AC_EVERY     = 5      # refresh _ac sau mỗi N chương thành công
 MAX_RETRIES          = 3       # số lần retry khi lỗi mạng
 
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
+        "Chrome/147.0.0.0 Safari/537.36"
     ),
     "Accept": "*/*",
-    "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
-    "sec-ch-ua": '"Google Chrome";v="120", "Chromium";v="120", "Not-A.Brand";v="99"',
+    "Accept-Language": "en-US,en;q=0.9,vi;q=0.8,ko;q=0.7",
+    "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": '"Windows"',
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
+    "priority": "u=1, i",
 }
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -68,38 +71,54 @@ HEADERS = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_cookies(session: requests.Session):
-    """Nạp cookies từ stv_cookies.json vào session."""
+    """
+    Nạp cookies dài hạn từ stv_cookies.json vào session.
+    Chỉ load các cookies có hạn dài (>= 30 ngày) hoặc _acx/_ga* dài hạn.
+    Bỏ qua PHPSESSID, _ac, _gac, _gid, hstamp — những cái này sẽ được tự động cấp.
+    """
+    # Cookies ngắn hạn — bỏ qua, sẽ tự động lấy mới
+    SHORT_LIVED = {"PHPSESSID", "_ac", "_gac", "_gid", "hstamp",
+                   "_gat_gtag_UA_145395004_1", "cookieenabled"}
+
     if not Path(COOKIE_FILE).exists():
         raise FileNotFoundError(
             f"Không tìm thấy {COOKIE_FILE}. "
-            "Hãy chạy stv_save_cookies.py trước."
+            "Chỉ cần file chứa _acx — xem hướng dẫn."
         )
     with open(COOKIE_FILE, encoding="utf-8") as f:
         cookies = json.load(f)
+
+    loaded = 0
     for c in cookies:
+        if c["name"] in SHORT_LIVED:
+            continue
         session.cookies.set(
             c["name"], c["value"],
             domain=c.get("domain", "sangtacviet.app").lstrip("."),
             path=c.get("path", "/"),
         )
-    print(f"  [cookies] Loaded {len(cookies)} cookies")
+        loaded += 1
+
+    # _acx là cookie quan trọng nhất — kiểm tra có không
+    acx = session.cookies.get("_acx", domain="sangtacviet.app")
+    if not acx:
+        raise ValueError("❌ Không tìm thấy _acx trong cookies file! Cần cập nhật stv_cookies.json.")
+
+    print(f"  [cookies] Loaded {loaded} long-lived cookies | _acx={acx[:15]}...")
+    print(f"  [cookies] PHPSESSID/_ac/_gac sẽ được tự động lấy mới")
 
 
 def refresh_ac_cookies(session: requests.Session, page_url: str):
     """
-    GET trang chương để lấy _ac/_gac mới (thay đổi mỗi session).
-    Giữ nguyên _acx, PHPSESSID và các cookies dài hạn từ file.
+    GET trang chương để server set _ac mới qua Set-Cookie header.
+    requests.Session tự động lưu cookie này vào jar.
     """
-    r = session.get(page_url, headers=HEADERS, timeout=30)
-    html = r.text
-    gac_m = re.search(r'document\.cookie\s*=\s*"_gac=([^;]+);', html)
-    ac_m  = re.search(r'document\.cookie\s*=\s*"_ac=([^;]+);',  html)
-    if gac_m:
-        session.cookies.set("_gac", gac_m.group(1), domain="sangtacviet.app", path="/")
-    if ac_m:
-        session.cookies.set("_ac",  ac_m.group(1),  domain="sangtacviet.app", path="/")
-    session.cookies.set("foreignlang", "vi",   domain="sangtacviet.app", path="/")
-    session.cookies.set("transmode",   "name", domain="sangtacviet.app", path="/")
+    try:
+        session.get(page_url, headers=HEADERS, timeout=30)
+        session.cookies.set("foreignlang", "vi",   domain="sangtacviet.app", path="/")
+        session.cookies.set("transmode",   "name", domain="sangtacviet.app", path="/")
+    except Exception as e:
+        print(f"    [refresh_ac] ERROR: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -109,16 +128,21 @@ def refresh_ac_cookies(session: requests.Session, page_url: str):
 def renew_session(session: requests.Session):
     """
     Lấy PHPSESSID mới bằng cách GET trang chủ STV.
-    PHPSESSID là session cookie — hết hạn khi server restart.
-    Gọi hàm này một lần trước khi fetch bất kỳ trang nào.
+    Xóa PHPSESSID cũ trước để server cấp session ID mới hoàn toàn.
     """
     print("  [session] Renewing PHPSESSID via homepage...")
     try:
+        # Xóa PHPSESSID cũ để server cấp mới
+        try:
+            session.cookies.clear(domain="sangtacviet.app", path="/", name="PHPSESSID")
+        except Exception:
+            pass
+
         r = session.get(STV_BASE + "/", headers=HEADERS, timeout=15)
-        # requests tự động lưu Set-Cookie từ response vào session
         new_php = session.cookies.get("PHPSESSID", domain="sangtacviet.app")
         print(f"  [session] New PHPSESSID: {new_php[:10]}..." if new_php else "  [session] No PHPSESSID in response")
-        # Cũng refresh _ac/_gac luôn từ homepage
+
+        # Lấy _ac/_gac từ trang chủ
         gac_m = re.search(r'document\.cookie\s*=\s*"_gac=([^;]+);', r.text)
         ac_m  = re.search(r'document\.cookie\s*=\s*"_ac=([^;]+);',  r.text)
         if gac_m:
@@ -131,44 +155,101 @@ def renew_session(session: requests.Session):
 
 def fetch_chapter_list(session: requests.Session, book_host: str, book_id: str) -> list[dict]:
     """
-    Fetch trang chi tiết truyện STV bằng session (có cookies).
-    Trả về list[{"id": chapterId, "name": chapterName}].
-
-    URL trang: https://sangtacviet.app/truyen/{host}/1/{bookId}/
-    Selector : a.listchapitem  →  title = tên chương, id = chapterId
-               Chương free không có id → dùng index thứ tự
+    Lấy danh sách chương qua AJAX API của STV.
+    STV dùng pattern async: force=true trigger server fetch, sau đó poll.
     """
-    page_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/"
-    print(f"  [detail] GET {page_url}")
+    referer = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/"
+    headers_with_ref = {
+        **HEADERS,
+        "Referer": referer,
+        "X-Requested-With": "XMLHttpRequest",
+    }
 
-    try:
-        # Dùng session (có cookies) thay vì requests.get trực tiếp
-        r = session.get(page_url, headers=HEADERS, timeout=15)
-        if r.status_code == 403:
-            print(f"  [detail] 403 Forbidden — thử renew session rồi retry...")
-            renew_session(session)
-            r = session.get(page_url, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"  [detail] ERROR: {e}")
+    base_api = (
+        f"{STV_BASE}/index.php"
+        f"?ngmar=chapterlist&h={book_host}&bookid={book_id}&sajax=getchapterlist"
+    )
+
+    def parse_response(text: str) -> list[dict]:
+        """
+        Parse response từ API getchapterlist của STV.
+        Format JSON: {"code":1,"data":"flag-\/-chapterId-\/- Tên chương -\/\/-flag-\/-..."}
+        Sau json.loads(): delimiter chính = "-//-", trong entry dùng "-/-"
+        Mỗi entry: "{vip_flag}-/-{chapterId}-/- {chapterName}"
+        """
+        raw = text.strip()
+        if not raw:
+            return []
+
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict) and obj.get("code") == 1 and "data" in obj:
+                data_str = obj["data"]
+                # Tách từng chương theo -//-
+                entries = data_str.split("-//-")
+                result = []
+                for entry in entries:
+                    entry = entry.strip()
+                    if not entry:
+                        continue
+                    # Mỗi entry: "flag-/-chapterId-/- Tên chương"
+                    parts = entry.split("-/-")
+                    if len(parts) >= 3:
+                        chap_id   = parts[1].strip()
+                        chap_name = parts[2].strip()
+                        if chap_id and chap_name:
+                            result.append({"id": chap_id, "name": chap_name})
+                if result:
+                    return result
+        except Exception as e:
+            pass
+
+        # Fallback: parse HTML nếu không phải JSON format trên
+        doc = BeautifulSoup(raw, "html.parser")
+        items = doc.select("a.listchapitem")
+        if items:
+            result = []
+            auto_index = 1
+            for a in items:
+                name = a.get("title", "").strip() or a.text.strip()
+                if not name:
+                    auto_index += 1
+                    continue
+                cid = a.get("id", "").strip() or str(auto_index)
+                result.append({"id": cid, "name": name})
+                auto_index += 1
+            return result
+
         return []
 
-    doc = BeautifulSoup(r.text, "html.parser")
-    items = doc.select("a.listchapitem")
+    # Bước 1: Gửi force=true để trigger server fetch
+    force_url = base_api + "&force=true"
+    print(f"  [detail] Trigger: {force_url}")
+    try:
+        session.get(force_url, headers=headers_with_ref, timeout=20)
+    except Exception as e:
+        print(f"  [detail] Trigger error (bỏ qua): {e}")
 
-    chapters = []
-    auto_index = 1
-    for a in items:
-        name = a.get("title", "").strip() or a.text.strip()
-        if not name:
-            auto_index += 1
-            continue
-        cid = a.get("id", "").strip() or str(auto_index)
-        chapters.append({"id": cid, "name": name})
-        auto_index += 1
+    # Bước 2: Poll nhiều lần với delay tăng dần
+    poll_url = base_api
+    wait_times = [3, 5, 8]
+    for i, wait in enumerate(wait_times):
+        print(f"  [detail] Chờ {wait}s rồi poll lần {i+1}...")
+        time.sleep(wait)
+        try:
+            r = session.get(poll_url, headers=headers_with_ref, timeout=20)
+            print(f"  [detail] Poll {i+1}: status={r.status_code} len={len(r.text)}")
+            chapters = parse_response(r.text)
+            if chapters:
+                print(f"  [detail] Found {len(chapters)} chapters")
+                return chapters
+            if r.text.strip():
+                print(f"  [detail] Response không parse được: {r.text[:200]}")
+        except Exception as e:
+            print(f"  [detail] Poll error: {e}")
 
-    print(f"  [detail] Found {len(chapters)} chapters")
-    return chapters
+    print(f"  [detail] Thất bại sau {len(wait_times)} lần poll")
+    return []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -180,15 +261,13 @@ def get_chapter_content(
     book_host: str,
     book_id: str,
     chapter_id: str,
-) -> tuple[str, str] | None:
+) -> tuple[str, str] | str | None:
     """
     Lấy nội dung chương qua POST API STV.
-    Trả về (chapter_title, content) hoặc None nếu thất bại.
-
-    Luồng:
-      1. GET trang chương để refresh _ac/_gac
-      2. POST index.php?bookid=...&h=...&c=...&ngmar=readc&sajax=readchapter
-      3. Parse JSON → extract text từ HTML
+    Trả về:
+      - (chapter_title, content)  : thành công
+      - "RATE_LIMIT"              : bị rate limit (code=21), cần nghỉ dài
+      - None                      : lỗi khác
     """
     chapter_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chapter_id}/"
 
@@ -234,8 +313,12 @@ def get_chapter_content(
         return None
 
     if str(data.get("code")) != "0":
-        err = data.get("err", data.get("msg", "unknown"))
-        print(f"    [POST] API code={data.get('code')}: {err}")
+        err  = data.get("err", data.get("msg", "unknown"))
+        code = str(data.get("code"))
+        print(f"    [POST] API code={code}: {err}")
+        # Trả về chuỗi đặc biệt để caller biết đây là rate limit
+        if code == "21":
+            return "RATE_LIMIT"
         return None
 
     chapter_title = data.get("chaptername", "").strip()
@@ -362,6 +445,8 @@ def main():
 
         # ── Scrape từng chương ───────────────────────────────────────────────
         saved = 0
+        chap_count = 0  # đếm số chương đã xử lý để refresh _ac định kỳ
+
         for chap in chapter_list:
             chap_id   = chap["id"]
             chap_name = chap["name"]
@@ -370,27 +455,43 @@ def main():
             if chap_id in existing_ids:
                 continue
 
+            # Refresh _ac mỗi REFRESH_AC_EVERY chương để tránh rate limit
+            if chap_count > 0 and chap_count % REFRESH_AC_EVERY == 0:
+                chapter_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chap_id}/"
+                print(f"  [refresh] Refresh _ac sau {chap_count} chương...")
+                refresh_ac_cookies(session, chapter_url)
+                time.sleep(2)
+
             print(f"  [Chap] {chap_name} (id={chap_id})")
 
             # Retry loop
             result = None
             for attempt in range(1, MAX_RETRIES + 1):
                 result = get_chapter_content(session, book_host, book_id, chap_id)
+                if result == "RATE_LIMIT":
+                    print(f"    [Rate limit] Nghỉ {DELAY_ON_RATELIMIT}s rồi thử lại...")
+                    time.sleep(DELAY_ON_RATELIMIT)
+                    # Refresh _ac sau rate limit
+                    chapter_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chap_id}/"
+                    refresh_ac_cookies(session, chapter_url)
+                    time.sleep(2)
+                    result = None  # thử lại
+                    continue
                 if result is not None:
                     break
                 print(f"    [Retry {attempt}/{MAX_RETRIES}] Thất bại, thử lại...")
                 time.sleep(2)
 
-            if result is None:
+            if result is None or result == "RATE_LIMIT":
                 print(f"    [SKIP] Bỏ qua sau {MAX_RETRIES} lần thử")
-                # Ghi placeholder để không retry mãi
                 worksheet.append_row([chap_id, chap_name, ""])
+                chap_count += 1
                 time.sleep(DELAY_BETWEEN_CHAPS)
                 continue
 
             _, content = result
 
-            # Chia nhỏ nếu content quá dài (giới hạn Google Sheets ~50k ký tự/ô)
+            # Chia nhỏ nếu content quá dài
             if len(content) > CHAR_LIMIT:
                 rows = []
                 for k in range(0, len(content), CHAR_LIMIT):
@@ -401,6 +502,7 @@ def main():
                 worksheet.append_row([chap_id, chap_name, content])
 
             saved += 1
+            chap_count += 1
             print(f"    [OK] Đã lưu ({len(content)} ký tự)")
             time.sleep(DELAY_BETWEEN_CHAPS)
 
