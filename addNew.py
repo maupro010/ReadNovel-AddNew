@@ -42,7 +42,7 @@ CREDENTIALS_FILE     = "credentials.json"
 SPREADSHEET_ID       = "1rCGTw4GdGlR4K-H7hDk8TjjnGh1jL3NgNZLRQ_h8jY8"
 STV_BASE             = "https://sangtacviet.app"
 CHAR_LIMIT           = 35000   # giới hạn ký tự mỗi ô Google Sheets
-DELAY_BETWEEN_CHAPS  = 30.0    # giây nghỉ giữa các chương (tăng từ 0.8 để tránh rate limit)
+DELAY_BETWEEN_CHAPS  = 3.0    # giây nghỉ giữa các chương (tăng từ 0.8 để tránh rate limit)
 DELAY_ON_RATELIMIT   = 30.0   # giây nghỉ khi bị rate limit (code=21)
 REFRESH_AC_EVERY     = 5      # refresh _ac sau mỗi N chương thành công
 MAX_RETRIES          = 3       # số lần retry khi lỗi mạng
@@ -87,6 +87,88 @@ def load_cookies(session: requests.Session):
     ac  = session.cookies.get("_ac",  domain="sangtacviet.app")
     print(f"  [cookies] Loaded {len(cookies)} cookies")
     print(f"  [cookies] _acx={acx[:16] if acx else 'N/A'}  PHPSESSID={php[:12] if php else 'N/A'}  _ac={ac[:16] if ac else 'N/A'}")
+
+
+def auto_refresh_cookies(session: requests.Session) -> bool:
+    """
+    Tự động lấy cookies mới từ sangtacviet.app bằng Playwright headless.
+    Không cần đăng nhập. Chạy được cả local lẫn GitHub Actions.
+    Lưu cookies mới vào COOKIE_FILE và nạp vào session.
+    """
+    print("  [auto-refresh] Cookies hết hạn. Tự động lấy cookies mới bằng Playwright...")
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  [auto-refresh] Playwright chưa cài. Chạy: pip install playwright && playwright install chromium")
+        return False
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox"],  # cần cho GitHub Actions
+            )
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/147.0.0.0 Safari/537.36",
+                locale="vi-VN",
+            )
+            page = context.new_page()
+
+            # Bước 1: load trang chủ để lấy PHPSESSID + _acx
+            print("  [auto-refresh] Step 1/2: Loading homepage...")
+            page.goto(STV_BASE + "/", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(2000)
+
+            # Bước 2: load trang list truyện để _acx được server kích hoạt
+            print("  [auto-refresh] Step 2/2: Loading truyen page...")
+            page.goto(STV_BASE + "/truyen/qidian/1/1033972532/", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(2000)
+
+            pw_cookies = context.cookies()
+            browser.close()
+
+        # Lọc chỉ lấy cookies của sangtacviet.app
+        cookie_list = [
+            {
+                "name":     c["name"],
+                "value":    c["value"],
+                "domain":   c["domain"].lstrip("."),
+                "path":     c.get("path", "/"),
+                "expires":  c.get("expires", -1),
+                "httpOnly": c.get("httpOnly", False),
+                "secure":   c.get("secure", False),
+                "sameSite": c.get("sameSite", "Lax"),
+            }
+            for c in pw_cookies
+            if "sangtacviet" in c.get("domain", "")
+        ]
+
+        if not cookie_list:
+            print("  [auto-refresh] Không lấy được cookies từ Playwright")
+            return False
+
+        # Lưu vào file (để lần sau dùng lại)
+        Path(COOKIE_FILE).write_text(
+            json.dumps(cookie_list, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+
+        # Nạp vào session hiện tại
+        session.cookies.clear()
+        for c in cookie_list:
+            session.cookies.set(c["name"], c["value"], domain=c["domain"], path=c["path"])
+
+        acx = session.cookies.get("_acx", domain="sangtacviet.app")
+        php = session.cookies.get("PHPSESSID", domain="sangtacviet.app")
+        print(f"  [auto-refresh] OK — {len(cookie_list)} cookies | "
+              f"_acx={acx[:16] if acx else 'N/A'}  PHPSESSID={php[:12] if php else 'N/A'}")
+        return True
+
+    except Exception as e:
+        print(f"  [auto-refresh] Lỗi Playwright: {e}")
+        return False
 
 
 def refresh_ac_cookies(session: requests.Session, page_url: str):
@@ -460,21 +542,29 @@ def main():
 
             # Retry loop
             result = None
+            cookie_refreshed = False  # chỉ auto-refresh 1 lần per chương
             for attempt in range(1, MAX_RETRIES + 1):
                 result = get_chapter_content(session, book_host, book_id, chap_id)
                 if result == "RATE_LIMIT":
                     print(f"    [Rate limit] Nghỉ {DELAY_ON_RATELIMIT}s rồi thử lại...")
                     time.sleep(DELAY_ON_RATELIMIT)
-                    # Refresh _ac sau rate limit
                     chapter_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chap_id}/"
                     refresh_ac_cookies(session, chapter_url)
                     time.sleep(2)
-                    result = None  # thử lại
+                    result = None
                     continue
                 if result is not None:
                     break
-                print(f"    [Retry {attempt}/{MAX_RETRIES}] Thất bại, thử lại...")
-                time.sleep(2)
+                # Lỗi thông thường (code=5/4002) — thử auto-refresh cookies lần đầu
+                if not cookie_refreshed:
+                    print(f"    [Retry {attempt}/{MAX_RETRIES}] Thử auto-refresh cookies...")
+                    if auto_refresh_cookies(session):
+                        cookie_refreshed = True
+                    else:
+                        time.sleep(2)
+                else:
+                    print(f"    [Retry {attempt}/{MAX_RETRIES}] Thất bại, thử lại...")
+                    time.sleep(2)
 
             if result is None or result == "RATE_LIMIT":
                 print(f"    [SKIP] Bỏ qua sau {MAX_RETRIES} lần thử")
@@ -485,15 +575,19 @@ def main():
 
             _, content = result
 
+            # Thay \n bằng | để lưu vào Sheets (Sheets mất \n khi đọc về qua API)
+            # App Android sẽ convert | thành \n khi đọc
+            content_for_sheet = content.replace("\n", "|")
+
             # Chia nhỏ nếu content quá dài
-            if len(content) > CHAR_LIMIT:
+            if len(content_for_sheet) > CHAR_LIMIT:
                 rows = []
-                for k in range(0, len(content), CHAR_LIMIT):
-                    chunk = content[k: k + CHAR_LIMIT]
+                for k in range(0, len(content_for_sheet), CHAR_LIMIT):
+                    chunk = content_for_sheet[k: k + CHAR_LIMIT]
                     rows.append([chap_id, chap_name, chunk])
-                worksheet.append_rows(rows)
+                worksheet.append_rows(rows, value_input_option='RAW')
             else:
-                worksheet.append_row([chap_id, chap_name, content])
+                worksheet.append_row([chap_id, chap_name, content_for_sheet], value_input_option='RAW')
 
             saved += 1
             chap_count += 1
