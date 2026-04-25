@@ -73,11 +73,25 @@ HEADERS = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_cookies(session: requests.Session):
-    """Nạp toàn bộ cookies từ stv_cookies.json vào session."""
+    """
+    Nạp cookies từ stv_cookies.json nếu có (optional).
+    Nếu file thiếu/lỗi, bỏ qua — bootstrap_cookies_for_novel() sẽ tự lấy cookies cho từng truyện.
+    """
     if not Path(COOKIE_FILE).exists():
-        raise FileNotFoundError(f"Không tìm thấy {COOKIE_FILE}.")
-    with open(COOKIE_FILE, encoding="utf-8") as f:
-        cookies = json.load(f)
+        print(f"  [cookies] Không có {COOKIE_FILE} — sẽ tự bootstrap cho từng truyện")
+        return
+
+    try:
+        with open(COOKIE_FILE, encoding="utf-8") as f:
+            content = f.read().strip()
+        if not content:
+            print(f"  [cookies] {COOKIE_FILE} rỗng — sẽ tự bootstrap")
+            return
+        cookies = json.loads(content)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"  [cookies] {COOKIE_FILE} không đọc được ({e}) — sẽ tự bootstrap")
+        return
+
     for c in cookies:
         session.cookies.set(
             c["name"], c["value"],
@@ -740,7 +754,6 @@ def main():
 
             # Bỏ qua chương đã có (so sánh ID thực tế, không dùng index)
             if chap_id in existing_ids:
-            # if chapter_list.index(chap) < len(existing_ids):
                 continue
 
             # Nghỉ dài sau mỗi LONG_BREAK_EVERY chương để tránh bị block IP
