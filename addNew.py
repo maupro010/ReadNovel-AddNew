@@ -42,10 +42,12 @@ CREDENTIALS_FILE     = "credentials.json"
 SPREADSHEET_ID       = "1rCGTw4GdGlR4K-H7hDk8TjjnGh1jL3NgNZLRQ_h8jY8"
 STV_BASE             = "https://sangtacviet.app"
 CHAR_LIMIT           = 35000   # giới hạn ký tự mỗi ô Google Sheets
-DELAY_BETWEEN_CHAPS  = 3.0    # giây nghỉ giữa các chương (tăng từ 0.8 để tránh rate limit)
-DELAY_ON_RATELIMIT   = 30.0   # giây nghỉ khi bị rate limit (code=21)
-REFRESH_AC_EVERY     = 5      # refresh _ac sau mỗi N chương thành công
-MAX_RETRIES          = 3       # số lần retry khi lỗi mạng
+DELAY_BETWEEN_CHAPS  = 10.0    # giây nghỉ giữa các chương (tăng để tránh bị block IP)
+DELAY_ON_RATELIMIT   = 60.0   # giây nghỉ khi bị rate limit (code=21)
+DELAY_LONG_BREAK     = 60.0  # giây nghỉ dài (3 phút) sau mỗi LONG_BREAK_EVERY chương
+REFRESH_AC_EVERY     = 5      # refresh _ac sau mỗi N chương
+LONG_BREAK_EVERY     = 30     # nghỉ dài sau mỗi N chương để tránh bị block IP
+MAX_RETRIES          = 3       # số lần retry khi lỗi
 
 HEADERS = {
     "User-Agent": (
@@ -86,14 +88,14 @@ def load_cookies(session: requests.Session):
     php = session.cookies.get("PHPSESSID", domain="sangtacviet.app")
     ac  = session.cookies.get("_ac",  domain="sangtacviet.app")
     print(f"  [cookies] Loaded {len(cookies)} cookies")
-    print(f"  [cookies] _acx={acx[:16] if acx else 'N/A'}  PHPSESSID={php[:12] if php else 'N/A'}  _ac={ac[:16] if ac else 'N/A'}")
+    print(f"  [cookies] _acx={acx if acx else 'N/A'}  PHPSESSID={php[:12] if php else 'N/A'}  _ac={ac[:16] if ac else 'N/A'}")
 
 
 def auto_refresh_cookies(session: requests.Session) -> bool:
     """
-    Tự động lấy cookies mới từ sangtacviet.app bằng Playwright headless.
-    Không cần đăng nhập. Chạy được cả local lẫn GitHub Actions.
-    Lưu cookies mới vào COOKIE_FILE và nạp vào session.
+    Tự động refresh PHPSESSID và _ac bằng Playwright headless.
+    QUAN TRỌNG: Giữ nguyên _acx từ file cookies gốc — không dùng _acx từ Playwright
+    vì _acx mới chưa được server tin tưởng.
     """
     print("  [auto-refresh] Cookies hết hạn. Tự động lấy cookies mới bằng Playwright...")
     try:
@@ -102,11 +104,15 @@ def auto_refresh_cookies(session: requests.Session) -> bool:
         print("  [auto-refresh] Playwright chưa cài. Chạy: pip install playwright && playwright install chromium")
         return False
 
+    # Lưu _acx hiện tại (từ file gốc) trước khi Playwright ghi đè
+    saved_acx = session.cookies.get("_acx", domain="sangtacviet.app")
+    saved_ga  = session.cookies.get("_ga",  domain="sangtacviet.app")
+
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox"],  # cần cho GitHub Actions
+                args=["--no-sandbox", "--disable-setuid-sandbox"],
             )
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -116,12 +122,10 @@ def auto_refresh_cookies(session: requests.Session) -> bool:
             )
             page = context.new_page()
 
-            # Bước 1: load trang chủ để lấy PHPSESSID + _acx
             print("  [auto-refresh] Step 1/2: Loading homepage...")
             page.goto(STV_BASE + "/", wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2000)
 
-            # Bước 2: load trang list truyện để _acx được server kích hoạt
             print("  [auto-refresh] Step 2/2: Loading truyen page...")
             page.goto(STV_BASE + "/truyen/qidian/1/1033972532/", wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2000)
@@ -129,41 +133,46 @@ def auto_refresh_cookies(session: requests.Session) -> bool:
             pw_cookies = context.cookies()
             browser.close()
 
-        # Lọc chỉ lấy cookies của sangtacviet.app
+        # Chỉ lấy PHPSESSID và _ac từ Playwright
+        new_php = next((c for c in pw_cookies if c["name"] == "PHPSESSID"
+                        and "sangtacviet" in c.get("domain", "")), None)
+        new_ac  = next((c for c in pw_cookies if c["name"] == "_ac"
+                        and "sangtacviet" in c.get("domain", "")), None)
+
+        if new_php:
+            session.cookies.set("PHPSESSID", new_php["value"],
+                                domain="sangtacviet.app", path="/")
+        if new_ac:
+            session.cookies.set("_ac", new_ac["value"],
+                                domain="sangtacviet.app", path="/")
+
+        # Khôi phục _acx và _ga từ file gốc (KHÔNG dùng _acx từ Playwright)
+        if saved_acx:
+            session.cookies.set("_acx", saved_acx, domain="sangtacviet.app", path="/")
+        if saved_ga:
+            session.cookies.set("_ga",  saved_ga,  domain="sangtacviet.app", path="/")
+
+        # Cập nhật hstamp
+        session.cookies.set("hstamp", str(int(time.time())),
+                             domain="sangtacviet.app", path="/")
+
+        # Lưu toàn bộ cookies hiện tại vào file
         cookie_list = [
-            {
-                "name":     c["name"],
-                "value":    c["value"],
-                "domain":   c["domain"].lstrip("."),
-                "path":     c.get("path", "/"),
-                "expires":  c.get("expires", -1),
-                "httpOnly": c.get("httpOnly", False),
-                "secure":   c.get("secure", False),
-                "sameSite": c.get("sameSite", "Lax"),
-            }
-            for c in pw_cookies
-            if "sangtacviet" in c.get("domain", "")
+            {"name": c.name, "value": c.value,
+             "domain": c.domain, "path": c.path,
+             "expires": -1, "httpOnly": False,
+             "secure": False, "sameSite": "Lax"}
+            for c in session.cookies
         ]
-
-        if not cookie_list:
-            print("  [auto-refresh] Không lấy được cookies từ Playwright")
-            return False
-
-        # Lưu vào file (để lần sau dùng lại)
         Path(COOKIE_FILE).write_text(
             json.dumps(cookie_list, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
 
-        # Nạp vào session hiện tại
-        session.cookies.clear()
-        for c in cookie_list:
-            session.cookies.set(c["name"], c["value"], domain=c["domain"], path=c["path"])
-
         acx = session.cookies.get("_acx", domain="sangtacviet.app")
         php = session.cookies.get("PHPSESSID", domain="sangtacviet.app")
-        print(f"  [auto-refresh] OK — {len(cookie_list)} cookies | "
-              f"_acx={acx[:16] if acx else 'N/A'}  PHPSESSID={php[:12] if php else 'N/A'}")
+        print(f"  [auto-refresh] OK — _acx={acx[:16] if acx else 'N/A'}  "
+              f"PHPSESSID={php[:12] if php else 'N/A'} (new)")
         return True
 
     except Exception as e:
@@ -182,6 +191,200 @@ def refresh_ac_cookies(session: requests.Session, page_url: str):
         session.cookies.set("transmode",   "name", domain="sangtacviet.app", path="/")
     except Exception as e:
         print(f"    [refresh_ac] ERROR: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AUTO BOOTSTRAP COOKIES PER NOVEL
+# ══════════════════════════════════════════════════════════════════════════════
+
+def bootstrap_cookies_for_novel(
+    session: requests.Session,
+    book_host: str,
+    book_id: str,
+) -> bool:
+    """
+    Mỗi truyện trên STV cần một bộ cookies (_ac, _acx, hstamp, PHPSESSID...)
+    được server bind riêng cho bookId đó. Hàm này dùng Playwright headless
+    mở trang truyện + 1 chương đầu tiên để server trả về đúng bộ cookies,
+    sau đó nạp toàn bộ vào session requests.
+
+    Trả về True nếu lấy được cookies, False nếu lỗi.
+    """
+    print(f"  [bootstrap] Lấy cookies cho truyện {book_host}/{book_id}...")
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  [bootstrap] Playwright chưa cài. pip install playwright && playwright install chromium")
+        return False
+
+    novel_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/"
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=False,     # ← STV detect headless qua navigator.webdriver
+                                    #   → JS không render trang chương → _ac không activate
+                channel="chrome",   # ← Chrome thật
+                args=["--no-sandbox", "--disable-setuid-sandbox",
+                      "--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(
+                user_agent=HEADERS["User-Agent"],
+                locale="vi-VN",
+            )
+
+            # Inject foreignlang cookie ngay trước khi vào → tránh popup chọn ngôn ngữ
+            context.add_cookies([
+                {"name": "foreignlang", "value": "vi",
+                 "domain": "sangtacviet.app", "path": "/"},
+                {"name": "transmode",   "value": "name",
+                 "domain": "sangtacviet.app", "path": "/"},
+            ])
+
+            page = context.new_page()
+
+            # Bước 1: Mở trang chủ trước để server set PHPSESSID
+            print(f"  [bootstrap] Loading homepage...")
+            page.goto(STV_BASE + "/", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(1500)
+
+            # Bước 2: Mở trang mục lục truyện → server set _acx riêng cho bookId
+            print(f"  [bootstrap] Loading {novel_url}")
+            page.goto(novel_url, wait_until="domcontentloaded", timeout=30000)
+
+            # Chờ AJAX load xong danh sách chương
+            try:
+                page.wait_for_selector("a.listchapitem", timeout=15000)
+                print(f"  [bootstrap] Chapter list loaded")
+            except Exception:
+                print(f"  [bootstrap] Chapter list timeout")
+            page.wait_for_timeout(1500)
+
+            # Bước 3: Lấy chapterId đầu tiên qua AJAX API
+            # (DOM của STV không lưu chapter ID trong attribute thông thường)
+            print(f"  [bootstrap] Fetching chapter list via API in browser context...")
+            first_chap_id = None
+            try:
+                api_url = (
+                    f"{STV_BASE}/index.php"
+                    f"?ngmar=chapterlist&h={book_host}&bookid={book_id}"
+                    f"&sajax=getchapterlist&force=true"
+                )
+                # Trigger
+                page.evaluate(f"fetch('{api_url}')")
+                page.wait_for_timeout(3000)
+                # Poll
+                api_url_poll = api_url.replace("&force=true", "")
+                resp_text = page.evaluate(f"""
+                    async () => {{
+                        const r = await fetch('{api_url_poll}');
+                        return await r.text();
+                    }}
+                """)
+                if resp_text and resp_text.strip().startswith("{"):
+                    obj = json.loads(resp_text)
+                    if obj.get("code") == 1 and "data" in obj:
+                        entries = obj["data"].split("-//-")
+                        if entries:
+                            first_entry = entries[0].split("-/-")
+                            if len(first_entry) >= 3:
+                                first_chap_id = first_entry[1].strip()
+                                print(f"  [bootstrap] First chapter ID: {first_chap_id}")
+            except Exception as e:
+                print(f"  [bootstrap] Get chapter list error: {e}")
+
+            # Bước 4: Mở trang chương đầu trong Playwright
+            # → JS trên trang sẽ set _ac, _gac, hstamp vào document.cookie
+            if first_chap_id:
+                chap_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{first_chap_id}/"
+                print(f"  [bootstrap] Loading first chapter in browser: {chap_url}")
+                page.goto(chap_url, wait_until="domcontentloaded", timeout=30000)
+
+                # Xử lý popup ngôn ngữ nếu xuất hiện
+                try:
+                    page.click('.seloption[value="vi"]', timeout=3000)
+                    print(f"  [bootstrap] Clicked Tiếng Việt option")
+                    page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+
+                # Click vào nút "Nhấp vào để tải chương..." nếu có
+                try:
+                    page.click('text=Nhấp vào để tải', timeout=3000)
+                    print(f"  [bootstrap] Clicked load chapter button")
+                    page.wait_for_timeout(2000)
+                except Exception:
+                    pass
+
+                # Chờ tới khi có element nội dung chương
+                content_loaded = False
+                try:
+                    page.wait_for_function(
+                        "document.querySelectorAll('i[h]').length > 5 || "
+                        "document.querySelector('#content-container .contentbox') && "
+                        "document.querySelector('#content-container .contentbox').innerText.length > 200",
+                        timeout=30000,
+                    )
+                    content_loaded = True
+                    print(f"  [bootstrap] Chapter content rendered")
+                except Exception:
+                    print(f"  [bootstrap] Chapter content timeout — chờ thêm")
+                page.wait_for_timeout(3000)
+            else:
+                chap_url = novel_url
+
+            # Lấy tất cả cookies từ context (sau khi JS đã set _ac)
+            pw_cookies = context.cookies()
+            browser.close()
+
+        # Debug: in tất cả cookies Playwright thấy
+        print(f"  [bootstrap] Playwright cookies ({len(pw_cookies)}):")
+        for c in pw_cookies:
+            print(f"    {c['name']:<25} domain={c.get('domain','?'):<25} value={str(c.get('value',''))[:30]}")
+
+        # Xoá cookies cũ của domain sangtacviet.app trong session
+        # requests.Session lưu cookies theo từng domain riêng — cần xoá cả 2 biến thể
+        for dom in ("sangtacviet.app", ".sangtacviet.app"):
+            try:
+                session.cookies.clear(domain=dom, path="/")
+            except Exception:
+                pass
+
+        # Nạp cookies mới — set với domain="sangtacviet.app" (không dấu chấm)
+        # để session.cookies.get(name, domain="sangtacviet.app") tìm thấy
+        for c in pw_cookies:
+            cdom = c.get("domain", "")
+            if "sangtacviet" not in cdom:
+                continue
+            session.cookies.set(
+                c["name"], c["value"],
+                domain="sangtacviet.app",   # luôn dùng dạng không dấu chấm
+                path=c.get("path", "/"),
+            )
+
+        # Đảm bảo foreignlang/transmode luôn có
+        session.cookies.set("foreignlang", "vi",   domain="sangtacviet.app", path="/")
+        session.cookies.set("transmode",   "name", domain="sangtacviet.app", path="/")
+
+        # Cập nhật hstamp (timestamp client) cho lần dùng tiếp theo
+        session.cookies.set("hstamp", str(int(time.time())),
+                            domain="sangtacviet.app", path="/")
+
+        # Verify
+        acx = session.cookies.get("_acx", domain="sangtacviet.app")
+        php = session.cookies.get("PHPSESSID", domain="sangtacviet.app")
+        ac  = session.cookies.get("_ac",  domain="sangtacviet.app")
+        gac = session.cookies.get("_gac", domain="sangtacviet.app")
+        print(f"  [bootstrap] Session cookies — _ac={ac[:16] if ac else 'N/A'}  "
+              f"_gac={gac[:16] if gac else 'N/A'}  "
+              f"_acx={acx[:16] if acx else 'N/A'}  "
+              f"PHPSESSID={php[:12] if php else 'N/A'}")
+
+        return bool(ac and acx and php)
+
+    except Exception as e:
+        print(f"  [bootstrap] Lỗi Playwright: {e}")
+        return False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -334,9 +537,10 @@ def get_chapter_content(
     """
     chapter_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chapter_id}/"
 
-    # Bước 1: refresh _ac qua Set-Cookie + cập nhật hstamp
-    refresh_ac_cookies(session, chapter_url)
+    # Chỉ cập nhật hstamp, không refresh _ac (dùng _ac từ file cookies)
     session.cookies.set("hstamp", str(int(time.time())), domain="sangtacviet.app", path="/")
+    ac_val = session.cookies.get("_ac", domain="sangtacviet.app")
+    print(f"    [ac] {ac_val[:20] if ac_val else 'N/A'}")
 
     # Bước 2: POST API
     api_url = (
@@ -350,9 +554,10 @@ def get_chapter_content(
             data="",
             headers={
                 **HEADERS,
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Origin":       STV_BASE,
-                "Referer":      chapter_url,
+                "Content-Type":   "application/x-www-form-urlencoded",
+                "Content-Length": "0",
+                "Origin":         STV_BASE,
+                "Referer":        chapter_url,
             },
             timeout=30,
         )
@@ -380,7 +585,6 @@ def get_chapter_content(
         err  = data.get("err", data.get("msg", "unknown"))
         code = str(data.get("code"))
         print(f"    [POST] API code={code}: {err}")
-        # Trả về chuỗi đặc biệt để caller biết đây là rate limit
         if code == "21":
             return "RATE_LIMIT"
         return None
@@ -513,6 +717,12 @@ def main():
                 existing_ids.add(val)
         print(f"  [Sheets] Đã có {len(existing_ids)} chương")
 
+        # ── Auto-bootstrap cookies riêng cho truyện này ─────────────────────
+        # Mỗi truyện cần bộ cookies _ac/_acx riêng do server bind theo bookId
+        if not bootstrap_cookies_for_novel(session, book_host, book_id):
+            print(f"  [Novel] Không lấy được cookies cho {novel_url}, bỏ qua.")
+            continue
+
         # ── Fetch danh sách chương từ trang STV ─────────────────────────────
         chapter_list = fetch_chapter_list(session, book_host, book_id)
         if not chapter_list:
@@ -521,63 +731,94 @@ def main():
 
         # ── Scrape từng chương ───────────────────────────────────────────────
         saved = 0
-        chap_count = 0  # đếm số chương đã xử lý để refresh _ac định kỳ
+        chap_count = 0
+        global_cookie_refreshed = False  # chỉ auto-refresh 1 lần per novel
 
         for chap in chapter_list:
             chap_id   = chap["id"]
             chap_name = chap["name"]
 
-            # Bỏ qua chương đã có
+            # Bỏ qua chương đã có (so sánh ID thực tế, không dùng index)
             if chap_id in existing_ids:
+            # if chapter_list.index(chap) < len(existing_ids):
                 continue
 
+            # Nghỉ dài sau mỗi LONG_BREAK_EVERY chương để tránh bị block IP
+            # if chap_count > 0 and chap_count % LONG_BREAK_EVERY == 0:
+            #     print(f"  [long break] Nghỉ {DELAY_LONG_BREAK}s sau {chap_count} chương...")
+            #     time.sleep(DELAY_LONG_BREAK)
+
             # Refresh _ac mỗi REFRESH_AC_EVERY chương để tránh rate limit
-            if chap_count > 0 and chap_count % REFRESH_AC_EVERY == 0:
-                chapter_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chap_id}/"
-                print(f"  [refresh] Refresh _ac sau {chap_count} chương...")
-                refresh_ac_cookies(session, chapter_url)
-                time.sleep(2)
+            # if chap_count > 0 and chap_count % REFRESH_AC_EVERY == 0:
+            #     chapter_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chap_id}/"
+            #     print(f"  [refresh] Refresh _ac sau {chap_count} chương...")
+            #     refresh_ac_cookies(session, chapter_url)
+            #     time.sleep(2)
 
             print(f"  [Chap] {chap_name} (id={chap_id})")
 
             # Retry loop
             result = None
-            cookie_refreshed = False  # chỉ auto-refresh 1 lần per chương
+            # for attempt in range(1, MAX_RETRIES + 1):
+            #     result = get_chapter_content(session, book_host, book_id, chap_id)
+            #     if result == "RATE_LIMIT":
+            #         print(f"    [Rate limit] Nghỉ {DELAY_ON_RATELIMIT}s rồi thử lại...")
+            #         time.sleep(DELAY_ON_RATELIMIT)
+            #         chapter_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chap_id}/"
+            #         refresh_ac_cookies(session, chapter_url)
+            #         time.sleep(2)
+            #         result = None
+            #         continue
+            #     if result == "IP_BLOCKED":
+            #         print(f"  [IP BLOCKED] IP bị block bởi STV (lỗi 4003). Dừng scrape, thử lại sau 2-24 giờ.")
+            #         return  # dừng toàn bộ script
+            #     if result is not None:
+            #         break  # thành công → thoát retry loop
+            #     # Lỗi 4002 — thử auto-refresh cookies 1 lần duy nhất per novel
+            #     if not global_cookie_refreshed:
+            #         print(f"    [Retry {attempt}/{MAX_RETRIES}] Thử auto-refresh cookies...")
+            #         if auto_refresh_cookies(session):
+            #             global_cookie_refreshed = True
+            #         else:
+            #             time.sleep(2)
+            #     else:
+            #         print(f"    [Retry {attempt}/{MAX_RETRIES}] Thất bại, thử lại...")
+            #         time.sleep(2)
+
+
+            # Retry loop với bootstrap cookies khi gặp lỗi
+            result = None
             for attempt in range(1, MAX_RETRIES + 1):
                 result = get_chapter_content(session, book_host, book_id, chap_id)
+
                 if result == "RATE_LIMIT":
-                    print(f"    [Rate limit] Nghỉ {DELAY_ON_RATELIMIT}s rồi thử lại...")
+                    print(f"    [Rate limit] Nghỉ {DELAY_ON_RATELIMIT}s rồi bootstrap cookies...")
                     time.sleep(DELAY_ON_RATELIMIT)
-                    chapter_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chap_id}/"
-                    refresh_ac_cookies(session, chapter_url)
-                    time.sleep(2)
+                    bootstrap_cookies_for_novel(session, book_host, book_id)
                     result = None
                     continue
+
+                if result == "IP_BLOCKED":
+                    print(f"  [IP BLOCKED] IP bị STV chặn (lỗi 4003). Dừng scrape.")
+                    return
+
                 if result is not None:
-                    break
-                # Lỗi thông thường (code=5/4002) — thử auto-refresh cookies lần đầu
-                if not cookie_refreshed:
-                    print(f"    [Retry {attempt}/{MAX_RETRIES}] Thử auto-refresh cookies...")
-                    if auto_refresh_cookies(session):
-                        cookie_refreshed = True
-                    else:
-                        time.sleep(2)
-                else:
-                    print(f"    [Retry {attempt}/{MAX_RETRIES}] Thất bại, thử lại...")
-                    time.sleep(2)
+                    break  # thành công
+
+                # Lỗi 4002 hoặc lỗi khác → bootstrap lại cookies cho truyện này
+                print(f"    [Retry {attempt}/{MAX_RETRIES}] Bootstrap lại cookies...")
+                bootstrap_cookies_for_novel(session, book_host, book_id)
+                time.sleep(2)
 
             if result is None or result == "RATE_LIMIT":
                 print(f"    [SKIP] Bỏ qua sau {MAX_RETRIES} lần thử")
-                worksheet.append_row([chap_id, chap_name, ""])
-                chap_count += 1
-                time.sleep(DELAY_BETWEEN_CHAPS)
-                continue
+                break
 
             _, content = result
 
             # Thay \n bằng | để lưu vào Sheets (Sheets mất \n khi đọc về qua API)
             # App Android sẽ convert | thành \n khi đọc
-            content_for_sheet = content.replace("\n", "|")
+            content_for_sheet = content
 
             # Chia nhỏ nếu content quá dài
             if len(content_for_sheet) > CHAR_LIMIT:
