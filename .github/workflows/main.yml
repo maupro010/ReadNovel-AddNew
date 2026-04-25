@@ -2,37 +2,38 @@ name: Chay Script Scrape khi trigger
 
 on:
   workflow_dispatch:
-
+  
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
+
     steps:
-    - name: 1. Tai code ve (Checkout)
-      uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-    - name: 2. Thiet lap Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    - name: 3. Tao file credentials.json
-      env:
-        GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-      run: |
-        echo "$GOOGLE_CREDENTIALS" > credentials.json
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 gspread google-auth playwright
+          playwright install chrome --with-deps   # cài Chrome thật
 
-    - name: 4. Tao file stv_cookies.json
-      env:
-        STV_COOKIES: ${{ secrets.STV_COOKIES }}
-      run: |
-        echo "$STV_COOKIES" > stv_cookies.json
+      - name: Install Xvfb (display ảo cho headless=False)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
 
-    - name: 5. Cai dat thu vien Python
-      run: |
-        pip install gspread requests beautifulsoup4 playwright
+      - name: Write Google credentials
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
 
-    - name: 6. Cai dat Chromium cho Playwright
-      run: playwright install chromium --with-deps
-
-    - name: 7. Chay script Python
-      run: python addNew.py
+      - name: Run scraper với Xvfb
+        env:
+          PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+          PROXY_USER:   ${{ secrets.PROXY_USER }}
+          PROXY_PASS:   ${{ secrets.PROXY_PASS }}
+        run: |
+          # Xvfb tạo display ảo :99, Chrome dùng display này
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" python addNew.py
