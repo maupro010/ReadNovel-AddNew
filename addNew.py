@@ -124,12 +124,12 @@ def bootstrap_cookies_for_novel(
             page = context.new_page()
 
             # Bước 1: Homepage → server cấp PHPSESSID
-            page.goto(STV_BASE + "/", wait_until="domcontentloaded", timeout=30000)
+            page.goto(STV_BASE + "/", wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(1500)
 
             # Bước 2: Trang truyện → server cấp _acx riêng cho bookId
             print(f"  [bootstrap] Loading {novel_url}")
-            page.goto(novel_url, wait_until="domcontentloaded", timeout=30000)
+            page.goto(novel_url, wait_until="domcontentloaded", timeout=60000)
             try:
                 page.wait_for_selector("a.listchapitem", timeout=15000)
             except Exception:
@@ -184,7 +184,7 @@ def bootstrap_cookies_for_novel(
             # Bước 4: Mở trang chương đầu → JS set _ac, _gac vào document.cookie
             if first_chap_id:
                 chap_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{first_chap_id}/"
-                page.goto(chap_url, wait_until="domcontentloaded", timeout=30000)
+                page.goto(chap_url, wait_until="domcontentloaded", timeout=60000)
                 # Click qua popup ngôn ngữ và nút tải chương nếu có
                 for selector in ('.seloption[value="vi"]', 'text=Nhấp vào để tải'):
                     try:
@@ -196,7 +196,7 @@ def bootstrap_cookies_for_novel(
                 try:
                     page.wait_for_function(
                         "document.querySelectorAll('i[h]').length > 5",
-                        timeout=30000,
+                        timeout=60000,
                     )
                 except Exception:
                     pass
@@ -425,7 +425,7 @@ def extract_text_via_playwright(book_host: str, book_id: str, chapter_id: str) -
                 {"name": "transmode",   "value": "name", "domain": "sangtacviet.app", "path": "/"},
             ])
             page = context.new_page()
-            page.goto(chap_url, wait_until="domcontentloaded", timeout=30000)
+            page.goto(chap_url, wait_until="domcontentloaded", timeout=60000)
             for sel in ('.seloption[value="vi"]', 'text=Nhấp vào để tải'):
                 try:
                     page.click(sel, timeout=3000)
@@ -517,7 +517,7 @@ def get_pua_decoder(book_host: str, book_id: str):
             ])
             page = context.new_page()
             page.goto(f"{STV_BASE}/truyen/{book_host}/1/{book_id}/",
-                      wait_until="domcontentloaded", timeout=30000)
+                      wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(2000)
 
             # Lấy URL font fenc cho 'nunito' từ cssoutput.css
