@@ -321,19 +321,29 @@ def get_chapter_content(
     chapter_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chapter_id}/"
     session.cookies.set("hstamp", str(int(time.time())), domain="sangtacviet.app", path="/")
 
+    # Tham số `exts` cần thiết cho host=sangtac/dich (server check để trả text full)
+    # Format: clientWidth^fontColor^bgColor (mô phỏng browser desktop default)
+    if book_host in ("sangtac", "dich"):
+        exts = "1140^-16777216^-1383213"
+    else:
+        exts = ""
+
     api_url = (
         f"{STV_BASE}/index.php"
         f"?bookid={book_id}&h={book_host}&c={chapter_id}"
-        f"&ngmar=readc&sajax=readchapter&sty=1&exts="
+        f"&ngmar=readc&sajax=readchapter&sty=1&exts={exts}"
     )
+    # Body POST: host sangtac/dich cần "rescan=true&k=" để force server dịch text
+    # (giống nút "Nội dung không đầy đủ?, nhấp để hệ thống tải lại" trên web)
+    post_body = "rescan=true&k=" if book_host in ("sangtac", "dich") else ""
     try:
         resp = session.post(
             api_url,
-            data="",
+            data=post_body,
             headers={
                 **HEADERS,
                 "Content-Type":   "application/x-www-form-urlencoded",
-                "Content-Length": "0",
+                "Content-Length": str(len(post_body)),
                 "Origin":         STV_BASE,
                 "Referer":        chapter_url,
             },
@@ -366,7 +376,192 @@ def get_chapter_content(
             return "RATE_LIMIT"
         return None
 
-    return data.get("chaptername", "").strip(), extract_text(data.get("data", ""))
+    raw_html      = data.get("data", "")
+    chapter_title = data.get("chaptername", "").strip()
+
+    # Host sangtac/dich trả plain text với phụ âm bị thay bằng codepoint PUA
+    # (server STV obfuscation, font fenc render đúng glyph trên browser)
+    if book_host in ("sangtac", "dich") and "<i" not in raw_html:
+        # Convert HTML → plain text
+        text = re.sub(r'<br\s*/?>', '\n', raw_html, flags=re.IGNORECASE)
+        text = BeautifulSoup(text, "html.parser").get_text()
+        # Decode PUA → ký tự Việt thật (cần font fenc của truyện này)
+        decoder = get_pua_decoder(book_host, book_id)
+        if decoder:
+            text = decoder.decode(text)
+        text = re.sub(r'\n{3,}', '\n\n', text).strip()
+        return chapter_title, text
+
+    # Các host khác mà thiếu <i> → fallback Playwright (chương intro/giới thiệu)
+    if "<i" not in raw_html:
+        print(f"    [extract] HTML không có <i> tag → fallback Playwright")
+        content = extract_text_via_playwright(book_host, book_id, chapter_id)
+        if content:
+            return chapter_title, content
+
+    return chapter_title, extract_text(raw_html)
+
+
+def extract_text_via_playwright(book_host: str, book_id: str, chapter_id: str) -> str:
+    """
+    Fallback: dùng Chrome thật mở trang chương, lấy innerText sau khi JS render xong.
+    Dùng cho các chương đặc biệt mà API trả HTML đã bị strip ký tự.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return ""
+
+    chap_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chapter_id}/"
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=False, channel="chrome",
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(user_agent=HEADERS["User-Agent"], locale="vi-VN")
+            context.add_cookies([
+                {"name": "foreignlang", "value": "vi", "domain": "sangtacviet.app", "path": "/"},
+                {"name": "transmode",   "value": "name", "domain": "sangtacviet.app", "path": "/"},
+            ])
+            page = context.new_page()
+            page.goto(chap_url, wait_until="domcontentloaded", timeout=30000)
+            for sel in ('.seloption[value="vi"]', 'text=Nhấp vào để tải'):
+                try:
+                    page.click(sel, timeout=3000)
+                    page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+            page.wait_for_timeout(5000)  # chờ JS render font glyphs
+
+            content = page.evaluate("""
+                () => {
+                    const el = document.querySelector('#content-container .contentbox')
+                            || document.querySelector('#content-container');
+                    return el ? el.innerText.trim() : '';
+                }
+            """) or ""
+            browser.close()
+            return content
+    except Exception as e:
+        print(f"    [extract-pw] error: {e}")
+        return ""
+
+
+# ──── PUA Decoder cho host=sangtac/dich ──────────────────────────────────
+# Server thay phụ âm Việt bằng codepoint PUA (U+E000-U+F8FF). Font fenc tải từ
+# /ctp/fenc/<hash>.ttf có glyph tại PUA codepoint với outline giống ký tự thật.
+# → Build mapping bằng cách match outline; decode text vỡ → tiếng Việt đầy đủ.
+
+class PUADecoder:
+    def __init__(self, font_bytes: bytes):
+        from fontTools.ttLib import TTFont
+        from fontTools.pens.recordingPen import RecordingPen
+        from io import BytesIO
+
+        ft = TTFont(BytesIO(font_bytes))
+        cmap = ft.getBestCmap()
+        glyph_set = ft.getGlyphSet()
+
+        def outline_key(name):
+            if name not in glyph_set:
+                return None
+            pen = RecordingPen()
+            glyph_set[name].draw(pen)
+            return str(pen.value) if pen.value else None
+
+        # Build dict outline → ký tự thật (ASCII + Latin Extended + Vietnamese)
+        real_outlines = {}
+        for cp in (list(range(0x20, 0x7F))
+                 + list(range(0x00C0, 0x0180))
+                 + list(range(0x1EA0, 0x1EFA))):
+            ch = chr(cp)
+            name = cmap.get(cp)
+            if name:
+                key = outline_key(name)
+                if key and key not in real_outlines:
+                    real_outlines[key] = ch
+
+        # Build PUA → real char mapping
+        self.mapping = {}
+        for cp, name in cmap.items():
+            if 0xE000 <= cp <= 0xF8FF:
+                key = outline_key(name)
+                if key in real_outlines:
+                    self.mapping[chr(cp)] = real_outlines[key]
+
+    def decode(self, text: str) -> str:
+        return ''.join(self.mapping.get(ch, ch) for ch in text)
+
+
+_pua_decoder_cache = {}
+
+def get_pua_decoder(book_host: str, book_id: str):
+    """Tải font fenc từ STV qua Playwright, build decoder, cache."""
+    cache_key = f"{book_host}/{book_id}"
+    if cache_key in _pua_decoder_cache:
+        return _pua_decoder_cache[cache_key]
+
+    print(f"    [pua] Tải font fenc cho {cache_key}...")
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=False, channel="chrome",
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(user_agent=HEADERS["User-Agent"], locale="vi-VN")
+            context.add_cookies([
+                {"name": "foreignlang", "value": "vi", "domain": "sangtacviet.app", "path": "/"},
+                {"name": "transmode",   "value": "name", "domain": "sangtacviet.app", "path": "/"},
+            ])
+            page = context.new_page()
+            page.goto(f"{STV_BASE}/truyen/{book_host}/1/{book_id}/",
+                      wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(2000)
+
+            # Lấy URL font fenc cho 'nunito' từ cssoutput.css
+            css_text = page.evaluate("""
+                async () => {
+                    const r = await fetch('/ctp/cssoutput.css?time=' + Date.now());
+                    return await r.text();
+                }
+            """)
+            m = re.search(r"font-family:\s*'nunito'\s*;\s*src:\s*url\('([^']+)'\)", css_text)
+            if not m:
+                m = re.search(r"src:\s*url\('(/ctp/fenc/[^']+\.ttf)'\)", css_text)
+            if not m:
+                print(f"    [pua] Không tìm thấy URL font fenc")
+                browser.close()
+                return None
+
+            font_url = m.group(1)
+            if not font_url.startswith("http"):
+                font_url = STV_BASE + font_url
+
+            # Fetch binary qua browser context (bypass anti-bot)
+            font_b64 = page.evaluate(f"""
+                async () => {{
+                    const r = await fetch('{font_url}');
+                    const buf = await r.arrayBuffer();
+                    const arr = new Uint8Array(buf);
+                    let bin = '';
+                    for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+                    return btoa(bin);
+                }}
+            """)
+            browser.close()
+
+        import base64
+        font_bytes = base64.b64decode(font_b64)
+        print(f"    [pua] Font: {len(font_bytes)} bytes, build decoder...")
+        decoder = PUADecoder(font_bytes)
+        print(f"    [pua] Decoder ready: {len(decoder.mapping)} mappings")
+        _pua_decoder_cache[cache_key] = decoder
+        return decoder
+    except Exception as e:
+        print(f"    [pua] Lỗi: {e}")
+        return None
 
 
 def extract_text(raw_html: str) -> str:
@@ -386,6 +581,7 @@ def extract_text(raw_html: str) -> str:
                 parts.append("\n")
                 return
             if node.name == "i" and node.get("h"):
+                # Inner text đã là tiếng Việt (server render sẵn)
                 parts.append(node.get_text(strip=True))
                 return
             for child in node.children:
@@ -570,8 +766,6 @@ def main():
             saved += 1
             print(f"    [OK] Đã lưu ({len(content)} ký tự)")
             time.sleep(DELAY_BETWEEN_CHAPS)
-
-        print(f"  [Novel] Hoàn tất: lưu {saved} chương mới")
 
         # ── Đánh dấu đã xong trong sheet list ───────────────────────────────
         current_row = find_current_row(novel_url)
