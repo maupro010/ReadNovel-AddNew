@@ -124,12 +124,12 @@ def bootstrap_cookies_for_novel(
             page = context.new_page()
 
             # Bước 1: Homepage → server cấp PHPSESSID
-            page.goto(STV_BASE + "/", wait_until="domcontentloaded", timeout=60000)
+            page.goto(STV_BASE + "/", wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(1500)
 
             # Bước 2: Trang truyện → server cấp _acx riêng cho bookId
             print(f"  [bootstrap] Loading {novel_url}")
-            page.goto(novel_url, wait_until="domcontentloaded", timeout=60000)
+            page.goto(novel_url, wait_until="domcontentloaded", timeout=30000)
             try:
                 page.wait_for_selector("a.listchapitem", timeout=15000)
             except Exception:
@@ -184,7 +184,7 @@ def bootstrap_cookies_for_novel(
             # Bước 4: Mở trang chương đầu → JS set _ac, _gac vào document.cookie
             if first_chap_id:
                 chap_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{first_chap_id}/"
-                page.goto(chap_url, wait_until="domcontentloaded", timeout=60000)
+                page.goto(chap_url, wait_until="domcontentloaded", timeout=30000)
                 # Click qua popup ngôn ngữ và nút tải chương nếu có
                 for selector in ('.seloption[value="vi"]', 'text=Nhấp vào để tải'):
                     try:
@@ -192,11 +192,21 @@ def bootstrap_cookies_for_novel(
                         page.wait_for_timeout(1000)
                     except Exception:
                         pass
-                # Chờ nội dung render
+                # Chờ nội dung render (i[h] cho qidian/fanqie, text plain cho dich/sangtac)
                 try:
                     page.wait_for_function(
-                        "document.querySelectorAll('i[h]').length > 5",
-                        timeout=60000,
+                        """
+                        () => {
+                            const el = document.querySelector('#maincontent')
+                                    || document.querySelector('[id^="cld-"]');
+                            if (!el) return false;
+                            const txt = el.innerText || '';
+                            return txt.length > 200
+                                && !txt.includes('Nhấp vào để tải')
+                                && !txt.includes('Vui lòng xác nhận');
+                        }
+                        """,
+                        timeout=30000,
                     )
                 except Exception:
                     pass
@@ -347,7 +357,7 @@ def get_chapter_content(
                 "Origin":         STV_BASE,
                 "Referer":        chapter_url,
             },
-            timeout=30,
+            timeout=60,
         )
         resp.raise_for_status()
     except Exception as e:
@@ -374,6 +384,8 @@ def get_chapter_content(
         print(f"    [POST] API code={code}: {err}")
         if code == "21":
             return "RATE_LIMIT"
+        if 'Vui lòng đăng nhập để đọc chương vip Khởi điểm.' in err:
+            return "VIP"
         return None
 
     raw_html      = data.get("data", "")
@@ -425,7 +437,7 @@ def extract_text_via_playwright(book_host: str, book_id: str, chapter_id: str) -
                 {"name": "transmode",   "value": "name", "domain": "sangtacviet.app", "path": "/"},
             ])
             page = context.new_page()
-            page.goto(chap_url, wait_until="domcontentloaded", timeout=60000)
+            page.goto(chap_url, wait_until="domcontentloaded", timeout=30000)
             for sel in ('.seloption[value="vi"]', 'text=Nhấp vào để tải'):
                 try:
                     page.click(sel, timeout=3000)
@@ -517,7 +529,7 @@ def get_pua_decoder(book_host: str, book_id: str):
             ])
             page = context.new_page()
             page.goto(f"{STV_BASE}/truyen/{book_host}/1/{book_id}/",
-                      wait_until="domcontentloaded", timeout=60000)
+                      wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2000)
 
             # Lấy URL font fenc cho 'nunito' từ cssoutput.css
@@ -564,6 +576,86 @@ def get_pua_decoder(book_host: str, book_id: str):
         return None
 
 
+def solve_captcha_manually(session, book_host: str, book_id: str, chap_id: str) -> bool:
+    """
+    Mở Chrome thật để user click captcha. STV load chương qua AJAX readchapter,
+    captcha Cloudflare trigger trong quá trình đó → cần click nút tải + chờ user
+    giải captcha. Sau khi pass, copy cookies về session.
+    """
+    chap_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chap_id}/"
+
+    # Trên CI (GitHub Action) không có người click captcha → skip ngay
+    if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+        print(f"    [Captcha] Môi trường CI, không thể giải captcha thủ công — skip")
+        return False
+
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=False, channel="chrome",
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(user_agent=HEADERS["User-Agent"], locale="vi-VN")
+            for c in session.cookies:
+                if "sangtacviet" in c.domain:
+                    context.add_cookies([{
+                        "name": c.name, "value": c.value,
+                        "domain": "sangtacviet.app", "path": "/",
+                    }])
+            page = context.new_page()
+            page.goto(chap_url, wait_until="domcontentloaded", timeout=60000)
+
+            # Click qua popup ngôn ngữ + nút tải chương để trigger AJAX readchapter
+            for sel in ('.seloption[value="vi"]', 'text=Nhấp vào để tải'):
+                try:
+                    page.click(sel, timeout=3000)
+                    page.wait_for_timeout(1500)
+                except Exception:
+                    pass
+
+            print(f"    [Captcha] >>> NẾU có ô captcha trên cửa sổ Chrome, hãy click 'I'm not a robot' <<<")
+            print(f"    [Captcha] Đang chờ tối đa 180s để nội dung chương hiện...")
+
+            # Chờ tối đa 180s cho user giải captcha + chương load
+            success = False
+            for i in range(180):
+                time.sleep(1)
+                loaded = page.evaluate("""
+                    () => {
+                        const el = document.querySelector('#maincontent') 
+                                || document.querySelector('[id^="cld-"]');
+                        if (!el) return false;
+                        const txt = el.innerText || '';
+                        return txt.length > 200
+                            && !txt.includes('Nhấp vào để tải')
+                            && !txt.includes('Vui lòng xác nhận')
+                            && !txt.includes('Tải quá thời gian');
+                    }
+                """)
+                if loaded:
+                    print(f"    [Captcha] Đã pass + chương load sau {i+1}s")
+                    success = True
+                    break
+
+            pw_cookies = context.cookies()
+            browser.close()
+
+        if success:
+            for c in pw_cookies:
+                if "sangtacviet" in c.get("domain", ""):
+                    session.cookies.set(
+                        c["name"], c["value"],
+                        domain="sangtacviet.app", path=c.get("path", "/"),
+                    )
+            session.cookies.set("hstamp", str(int(time.time())),
+                                domain="sangtacviet.app", path="/")
+        return success
+    except Exception as e:
+        print(f"    [Captcha] Lỗi: {e}")
+        return False
+
+
 def extract_text(raw_html: str) -> str:
     """Parse HTML nội dung chương STV → plain text."""
     soup = BeautifulSoup(raw_html, "html.parser")
@@ -581,7 +673,7 @@ def extract_text(raw_html: str) -> str:
                 parts.append("\n")
                 return
             if node.name == "i" and node.get("h"):
-                # Inner text đã là tiếng Việt (server render sẵn)
+                # Inner text là dạng được render hiển thị trên web
                 parts.append(node.get_text(strip=True))
                 return
             for child in node.children:
@@ -728,24 +820,35 @@ def main():
 
             print(f"  [Chap] {chap_name} (id={chap_id})")
 
-            # Retry với bootstrap cookies khi gặp lỗi
+            # Retry với delay tăng dần khi gặp lỗi
             result = None
             for attempt in range(1, MAX_RETRIES + 1):
                 result = get_chapter_content(session, book_host, book_id, chap_id)
 
                 if result == "RATE_LIMIT":
-                    print(f"    [Rate limit] Nghỉ {DELAY_ON_RATELIMIT}s rồi bootstrap...")
-                    time.sleep(DELAY_ON_RATELIMIT)
-                    bootstrap_cookies_for_novel(session, book_host, book_id)
-                    result = None
-                    continue
+                    print(f"    [Captcha] Server yêu cầu xác nhận. Mở Chrome để bạn click captcha...")
+                    if solve_captcha_manually(session, book_host, book_id, chap_id):
+                        result = None
+                        continue
+                    else:
+                        print(f"    [Captcha] Không pass được captcha")
+                        break
 
                 if result is not None:
                     break
 
-                print(f"    [Retry {attempt}/{MAX_RETRIES}] Bootstrap lại cookies...")
-                bootstrap_cookies_for_novel(session, book_host, book_id)
-                time.sleep(2)
+                # Delay tăng dần: 30s, 60s, 120s — chờ server hồi phục
+                wait = 30 * (2 ** (attempt - 1))
+                print(f"    [Retry {attempt}/{MAX_RETRIES}] Chờ {wait}s rồi bootstrap lại...")
+                time.sleep(wait)
+
+                # Bootstrap, verify đủ cookies (cần cả _ac, _acx, PHPSESSID)
+                for boot_attempt in range(3):
+                    ok, _ = bootstrap_cookies_for_novel(session, book_host, book_id)
+                    if ok:
+                        break
+                    print(f"    [Bootstrap retry {boot_attempt+1}/3] Cookies chưa đủ, chờ 10s...")
+                    time.sleep(10)
 
             if result is None or result == "RATE_LIMIT":
                 print(f"    [SKIP] Bỏ qua sau {MAX_RETRIES} lần thử")
@@ -767,11 +870,7 @@ def main():
             print(f"    [OK] Đã lưu ({len(content)} ký tự)")
             time.sleep(DELAY_BETWEEN_CHAPS)
 
-        # ── Đánh dấu đã xong trong sheet list ───────────────────────────────
-        current_row = find_current_row(novel_url)
-        if current_row:
-            sheet_list.update_cell(current_row, 9, "false")
-            print(f"  [Sheets] Đánh dấu state = false cho row {current_row}")
+        print(f"  [Novel] Hoàn tất: lưu {saved} chương mới")
 
     print("\n[Main] Hoàn tất tất cả truyện.")
 
