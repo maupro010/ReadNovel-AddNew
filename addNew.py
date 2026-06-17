@@ -834,6 +834,11 @@ def main():
                         print(f"    [Captcha] Không pass được captcha")
                         break
 
+                if result == "VIP":
+                    # Chương VIP cần đăng nhập — bỏ qua chương này, tiếp tục chương sau
+                    print(f"    [VIP] Chương cần đăng nhập, bỏ qua chương này")
+                    break
+
                 if result is not None:
                     break
 
@@ -849,6 +854,10 @@ def main():
                         break
                     print(f"    [Bootstrap retry {boot_attempt+1}/3] Cookies chưa đủ, chờ 10s...")
                     time.sleep(10)
+
+            # Chương VIP → bỏ qua chương này nhưng tiếp tục các chương sau
+            if result == "VIP":
+                continue
 
             if result is None or result == "RATE_LIMIT":
                 print(f"    [SKIP] Bỏ qua sau {MAX_RETRIES} lần thử")
