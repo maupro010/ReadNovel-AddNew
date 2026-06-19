@@ -57,21 +57,21 @@ HEADERS = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_cookies(session: requests.Session):
-    """Nạp cookies từ stv_cookies.json (tuỳ chọn). Bootstrap sẽ override sau."""
+    """Nạp cookies từ stv_cookies.json. Trả về True nếu có cookies đăng nhập."""
     if not Path(COOKIE_FILE).exists():
         print(f"  [cookies] Không có {COOKIE_FILE} — sẽ tự bootstrap cho từng truyện")
-        return
+        return False
 
     try:
         with open(COOKIE_FILE, encoding="utf-8") as f:
             content = f.read().strip()
         if not content:
             print(f"  [cookies] {COOKIE_FILE} rỗng — sẽ tự bootstrap")
-            return
+            return False
         cookies = json.loads(content)
     except (json.JSONDecodeError, OSError) as e:
         print(f"  [cookies] {COOKIE_FILE} không đọc được ({e}) — sẽ tự bootstrap")
-        return
+        return False
 
     for c in cookies:
         session.cookies.set(
@@ -80,6 +80,15 @@ def load_cookies(session: requests.Session):
             path=c.get("path", "/"),
         )
     print(f"  [cookies] Loaded {len(cookies)} cookies")
+
+    # Có cookie đăng nhập STV (access/useri2) hoặc cf_clearance → cookies "xịn"
+    cookie_names = {c["name"].lower() for c in cookies}
+    has_login = bool(cookie_names & {
+        "cf_clearance", "access", "useri2", "member", "memberid", "userid", "uid"
+    })
+    if has_login:
+        print(f"  [cookies] Phát hiện cookies đăng nhập — ưu tiên dùng, bỏ qua bootstrap")
+    return has_login
 
 
 def bootstrap_cookies_for_novel(
@@ -251,6 +260,56 @@ def bootstrap_cookies_for_novel(
 # ══════════════════════════════════════════════════════════════════════════════
 # DANH SÁCH CHƯƠNG
 # ══════════════════════════════════════════════════════════════════════════════
+
+def format_update_time(dt_str: str) -> str:
+    """
+    Chuyển chuỗi ngày giờ VN (vd '2026-03-08 08:48:20') thành 'X tuần trước'.
+    Giống logic web STV. dt_str là giờ địa phương VN (UTC+7).
+    """
+    from datetime import datetime, timezone, timedelta
+    try:
+        dt = datetime.strptime(dt_str.strip(), "%Y-%m-%d %H:%M:%S")
+        # dt là giờ VN → gán tzinfo +7
+        dt = dt.replace(tzinfo=timezone(timedelta(hours=7)))
+        now = datetime.now(timezone(timedelta(hours=7)))
+        diff = int((now - dt).total_seconds())
+    except Exception:
+        return ""
+    if diff < 0:
+        diff = 0
+    week = diff // 604800
+    day  = diff // 86400
+    hour = diff // 3600
+    minute = diff // 60
+    if week > 0:
+        return f"{week} tuần trước"
+    if day > 0:
+        return f"{day} ngày trước"
+    if hour > 0:
+        return f"{hour} giờ trước"
+    if minute > 0:
+        return f"{minute} phút trước"
+    return "vừa xong"
+
+
+def get_update_time(session: requests.Session, book_host: str, book_id: str) -> str:
+    """
+    Lấy update time từ HTML trang truyện (element id='lastupdatetime').
+    Chứa chuỗi ngày giờ VN, vd '2026-03-08 08:48:20'.
+    """
+    url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/"
+    try:
+        r = session.get(url, headers=HEADERS, timeout=20)
+        m = re.search(
+            r"id=['\"]lastupdatetime['\"][^>]*>([^<]+)<",
+            r.text,
+        )
+        if m:
+            return format_update_time(m.group(1))
+    except Exception:
+        pass
+    return ""
+
 
 def fetch_chapter_list(session: requests.Session, book_host: str, book_id: str) -> list[dict]:
     """
@@ -578,35 +637,47 @@ def get_pua_decoder(book_host: str, book_id: str):
 
 def solve_captcha_manually(session, book_host: str, book_id: str, chap_id: str) -> bool:
     """
-    Mở Chrome thật để user click captcha. STV load chương qua AJAX readchapter,
-    captcha Cloudflare trigger trong quá trình đó → cần click nút tải + chờ user
-    giải captcha. Sau khi pass, copy cookies về session.
+    Mở Chrome với profile thật để user click captcha. Dùng persistent context
+    (profile riêng cho scraper) giúp Cloudflare tin tưởng hơn so với context tạm.
     """
     chap_url = f"{STV_BASE}/truyen/{book_host}/1/{book_id}/{chap_id}/"
 
-    # Trên CI (GitHub Action) không có người click captcha → skip ngay
+    # Trên CI không có người click captcha → skip ngay
     if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
         print(f"    [Captcha] Môi trường CI, không thể giải captcha thủ công — skip")
         return False
 
+    # Profile Chrome riêng cho scraper (giữ cookies Cloudflare qua các lần chạy)
+    profile_dir = str(Path.home() / ".stv_chrome_profile")
+
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=False, channel="chrome",
-                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            # persistent context = dùng profile thật, KHÔNG phải context tạm
+            # → Cloudflare tin tưởng hơn, ít bị "Xác minh thất bại"
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=profile_dir,
+                headless=False,
+                channel="chrome",
+                user_agent=HEADERS["User-Agent"],
+                locale="vi-VN",
+                args=["--disable-blink-features=AutomationControlled"],
+                no_viewport=True,
             )
-            context = browser.new_context(user_agent=HEADERS["User-Agent"], locale="vi-VN")
+            # Nạp cookies session hiện tại
             for c in session.cookies:
                 if "sangtacviet" in c.domain:
-                    context.add_cookies([{
-                        "name": c.name, "value": c.value,
-                        "domain": "sangtacviet.app", "path": "/",
-                    }])
-            page = context.new_page()
+                    try:
+                        context.add_cookies([{
+                            "name": c.name, "value": c.value,
+                            "domain": "sangtacviet.app", "path": "/",
+                        }])
+                    except Exception:
+                        pass
+
+            page = context.pages[0] if context.pages else context.new_page()
             page.goto(chap_url, wait_until="domcontentloaded", timeout=60000)
 
-            # Click qua popup ngôn ngữ + nút tải chương để trigger AJAX readchapter
             for sel in ('.seloption[value="vi"]', 'text=Nhấp vào để tải'):
                 try:
                     page.click(sel, timeout=3000)
@@ -614,10 +685,10 @@ def solve_captcha_manually(session, book_host: str, book_id: str, chap_id: str) 
                 except Exception:
                     pass
 
-            print(f"    [Captcha] >>> NẾU có ô captcha trên cửa sổ Chrome, hãy click 'I'm not a robot' <<<")
-            print(f"    [Captcha] Đang chờ tối đa 180s để nội dung chương hiện...")
+            print(f"    [Captcha] >>> Click 'I'm not a robot' trên cửa sổ Chrome vừa mở <<<")
+            print(f"    [Captcha] Nếu vẫn 'Xác minh thất bại', thử bấm nút reload (mũi tên tròn) rồi click lại")
+            print(f"    [Captcha] Đang chờ tối đa 180s...")
 
-            # Chờ tối đa 180s cho user giải captcha + chương load
             success = False
             for i in range(180):
                 time.sleep(1)
@@ -639,7 +710,7 @@ def solve_captcha_manually(session, book_host: str, book_id: str, chap_id: str) 
                     break
 
             pw_cookies = context.cookies()
-            browser.close()
+            context.close()
 
         if success:
             for c in pw_cookies:
@@ -757,7 +828,7 @@ def main():
     else:
         print("[Proxy] Không có proxy, dùng IP trực tiếp")
 
-    load_cookies(session)
+    has_login_cookies = load_cookies(session)
 
     # Xử lý từng truyện
     for row_index, novel_url in pending:
@@ -784,11 +855,17 @@ def main():
         existing_ids = {v.strip() for v in worksheet.col_values(1)[1:] if v.strip()}
         print(f"  [Sheets] Đã có {len(existing_ids)} chương")
 
-        # Bootstrap cookies riêng cho truyện này
-        ok, update_time = bootstrap_cookies_for_novel(session, book_host, book_id)
-        if not ok:
-            print(f"  [Novel] Không lấy được cookies, bỏ qua.")
-            continue
+        # Nếu có cookies đăng nhập từ browser → dùng luôn, không bootstrap Playwright
+        # (cookies login đã pass Cloudflare; bootstrap Playwright bị captcha chặn)
+        update_time = ""
+        if has_login_cookies:
+            print(f"  [Novel] Dùng cookies đăng nhập, bỏ qua bootstrap")
+            update_time = get_update_time(session, book_host, book_id)
+        else:
+            ok, update_time = bootstrap_cookies_for_novel(session, book_host, book_id)
+            if not ok:
+                print(f"  [Novel] Không lấy được cookies, bỏ qua.")
+                continue
 
         # Ghi update_time vào sheet list (re-lookup row)
         if update_time and update_col:
