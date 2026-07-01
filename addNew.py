@@ -938,6 +938,7 @@ def main():
 
             if result is None or result == "RATE_LIMIT":
                 print(f"    [SKIP] Bỏ qua sau {MAX_RETRIES} lần thử")
+                sheet_list.update_cell(current_row, update_col + 2, "FALSE")
                 break
 
             _, content = result
@@ -957,6 +958,7 @@ def main():
             time.sleep(DELAY_BETWEEN_CHAPS)
 
         print(f"  [Novel] Hoàn tất: lưu {saved} chương mới")
+        sheet_list.update_cell(current_row, update_col + 2, "FALSE")
 
     print("\n[Main] Hoàn tất tất cả truyện.")
 
